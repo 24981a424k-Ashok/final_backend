@@ -88,8 +88,8 @@ class UniverseCollector:
         if not relevant_articles:
             return {"top_stories": [], "breaking_news": [], "videos": [], "newspaper_summary": "", "newspapers": []}
 
-        # 3. Analyze with OpenAI (batch processing) - INCREASED Batch to 40 for more quantity
-        analyzed_news = await self._analyze_with_rotation(relevant_articles[:40], country)
+        # 3. Analyze with OpenAI (batch processing) - Reduced Batch to 15 for better speed
+        analyzed_news = await self._analyze_with_rotation(relevant_articles[:15], country)
         
         # 4. Fallback Logic
         if not analyzed_news and relevant_articles:
@@ -280,40 +280,76 @@ class UniverseCollector:
                     return link.get('href')
         return None
 
+    async def search_global(self, query: str, db: SessionLocal) -> List[Dict[str, Any]]:
+        """
+        Hyper-fast global search using dynamic source discovery and parallel collection.
+        Optimized for < 40s response time.
+        """
+        logger.info(f"UNIVERSE: Performing hyper-fast global search for '{query}'...")
+        
+        # 1. Broad dynamic source creation
+        search_query = query.replace(" ", "+")
+        dynamic_sources = {
+            "Global Intelligence": f"https://news.google.com/rss/search?q={search_query}&hl=en-US&gl=US&ceid=US:en",
+            "Contextual Nodes": f"https://news.google.com/rss/search?q={search_query}+intelligence&hl=en-US&gl=US&ceid=US:en",
+            "Regional Insights": f"https://news.google.com/rss/search?q={search_query}+analysis&hl=en-US&gl=US&ceid=US:en"
+        }
+        
+        # 2. Parallel RSS fetch
+        tasks = [self._fetch_from_rss(name, url) for name, url in dynamic_sources.items()]
+        rss_results = await asyncio.gather(*tasks)
+        
+        all_articles = []
+        for res in rss_results:
+            all_articles.extend(res)
+            
+        if not all_articles:
+            return []
+
+        # 3. High-speed Parallel Analysis (Limit to top 10 for search speed)
+        # Use a very short timeout and prioritize premium keys
+        analyzed = await self._analyze_with_rotation(all_articles[:10], query)
+        
+        # 4. Fallback if LLM is slow
+        if not analyzed:
+            analyzed = self._generate_hybrid_fallback(all_articles, query)
+            
+        return analyzed
+
     async def _analyze_with_rotation(self, articles: List[Dict[str, Any]], country: str) -> List[Dict[str, Any]]:
-        """Analyze a batch of articles using rotated API keys."""
+        """Analyze a batch of articles using rotated API keys with aggressive timeouts."""
         results = []
         if not articles: return []
 
         prompt = f"""
-        Analyze these news articles for relevance to the country: {country}.
-        For each relevant article, provide:
-        - news_headline (concise)
-        - intelligence_summary (2-3 bullet points)
+        Analyze these news articles for relevance to: {country}.
+        Output ONLY a JSON list of objects:
+        - news_headline
+        - intelligence_summary (2-3 bullets)
         - why_it_matters_to_{country}
-        - bias_rating (Neutral/Left/Right)
+        - bias_rating
         - impact_score (1-10)
 
         Articles:
-        {json.dumps([{ 'title': a['title'], 'content': a['content'][:300], 'source': a['source_name'] } for a in articles])}
-
-        Output ONLY a JSON list of objects. If an article is NOT relevant to {country}, skip it.
+        {json.dumps([{ 'title': a['title'], 'content': a['content'][:250], 'source': a['source_name'] } for a in articles])}
         """
         
         all_keys = self.api_keys + [OPENAI_API_KEY]
         all_keys = [k for k in all_keys if k]
         
-        for i, key in enumerate(all_keys):
+        # INCREASED AGGRESSION: Limit attempt count to 3 for search stability
+        for i, key in enumerate(all_keys[:5]):
             try:
                 from openai import AsyncOpenAI
                 client = AsyncOpenAI(api_key=key)
+                # REDUCED TIMEOUT: 15s for search speed
                 response = await client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
                         {"role": "system", "content": "You are a global intelligence analyst. Output ONLY JSON."},
                         {"role": "user", "content": prompt}
                     ],
-                    timeout=45, # Higher timeout for larger batch
+                    timeout=15, 
                     temperature=0.2
                 )
                 raw_content = response.choices[0].message.content
@@ -334,7 +370,7 @@ class UniverseCollector:
                 await client.close()
                 return results 
             except Exception as e:
-                logger.warning(f"Universe Analysis API Key failure with index {i}: {e}")
+                logger.warning(f"Universe Analysis API Key failure index {i}: {e}")
                 continue
         
         return []

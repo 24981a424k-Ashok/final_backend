@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
 from apscheduler.schedulers.background import BackgroundScheduler
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from loguru import logger
 
@@ -46,55 +47,67 @@ async def run_news_cycle():
 
     try:
         # 1. Collect
-        logger.info("Step 1: Collection")
+        logger.info("Step 1: Parallel Collection")
         
-        api_count = rss_count = twitter_count = trending_count = gnews_count = 0
-        
-        try:
-            api_collector = NewsCollector()
-            api_count = api_collector.fetch_recent_news()
-        except Exception as e:
-            logger.error(f"NewsAPI Collector failed: {e}")
-            api_count = 0
-        
-        try:
-            from src.collectors.rss_collector import RSSCollector
-            rss_collector = RSSCollector()
-            rss_count = rss_collector.fetch_recent_news()
-        except Exception as e:
-            logger.error(f"RSS Collector failed: {e}")
-            rss_count = 0
-        
-        try:
-            twitter_collector = TwitterCollector()
-            twitter_count = twitter_collector.fetch_top_updates()
-        except Exception as e:
-            logger.error(f"Twitter Collector failed: {e}")
-            twitter_count = 0
-        
-        try:
-            social_collector = SocialMediaCollector()
-            trending_count = social_collector.fetch_trending_india()
-        except Exception as e:
-            logger.error(f"Social Media Collector failed: {e}")
-            trending_count = 0
+        async def fetch_api():
+            try:
+                collector = NewsCollector()
+                return await asyncio.to_thread(collector.fetch_recent_news)
+            except Exception as e:
+                logger.error(f"NewsAPI Collector failed: {e}")
+                return 0
 
+        async def fetch_rss():
+            try:
+                from src.collectors.rss_collector import RSSCollector
+                collector = RSSCollector()
+                return await asyncio.to_thread(collector.fetch_recent_news)
+            except Exception as e:
+                logger.error(f"RSS Collector failed: {e}")
+                return 0
 
+        async def fetch_twitter():
+            try:
+                collector = TwitterCollector()
+                return await asyncio.to_thread(collector.fetch_top_updates)
+            except Exception as e:
+                logger.error(f"Twitter Collector failed: {e}")
+                return 0
+
+        async def fetch_trending():
+            try:
+                collector = SocialMediaCollector()
+                return await asyncio.to_thread(collector.fetch_trending_india)
+            except Exception as e:
+                logger.error(f"Social Media Collector failed: {e}")
+                return 0
+
+        async def fetch_gnews():
+            try:
+                from src.collectors.gnews_collector import GNewsCollector
+                collector = GNewsCollector()
+                return await asyncio.to_thread(collector.fetch_country_news)
+            except Exception as e:
+                logger.error(f"GNews Collector failed: {e}")
+                return 0
+
+        # Run all collectors in parallel
+        results = await asyncio.gather(
+            fetch_api(),
+            fetch_rss(),
+            fetch_twitter(),
+            fetch_trending(),
+            fetch_gnews()
+        )
         
-        try:
-            from src.collectors.gnews_collector import GNewsCollector
-            gnews_collector = GNewsCollector()
-            gnews_count = gnews_collector.fetch_country_news()
-        except Exception as e:
-            logger.error(f"GNews Collector failed: {e}")
-            gnews_count = 0
+        api_count, rss_count, twitter_result, trending_result, gnews_count = results
         
         # Safe count extraction
-        t_count = twitter_count.get('new', 0) if isinstance(twitter_count, dict) else (twitter_count or 0)
-        s_count = trending_count.get('new', 0) if isinstance(trending_count, dict) else (trending_count or 0)
+        t_count = twitter_result.get('new', 0) if isinstance(twitter_result, dict) else (twitter_result or 0)
+        s_count = trending_result.get('new', 0) if isinstance(trending_result, dict) else (trending_result or 0)
         
         total_count = api_count + rss_count + t_count + s_count + gnews_count
-        logger.info(f"Collected {total_count} new articles (incl. {gnews_count} GNews, {t_count} Twitter, {s_count} Trending).")
+        logger.info(f"✅ Collection complete. Total new articles: {total_count}")
         
         if total_count == 0 and db.query(RawNews).count() == 0:
             logger.warning("No news collected and DB is empty. Aborting cycle.")
@@ -149,6 +162,9 @@ async def run_news_cycle():
             # Helper to map analysis result to VerifiedNews model
             def apply_analysis_to_news(news, result):
                 import json
+                # Save full raw analysis for later healing/UI extraction
+                news.analysis = result
+                
                 news.summary_bullets = result.get("summary_bullets", [])
                 news.why_it_matters = str(result.get("why_it_matters", ""))
                 who = result.get("who_is_affected", "")
@@ -214,9 +230,23 @@ async def run_news_cycle():
         ).all()
         
         for item in newly_analyzed:
-            SmsNotifier.broadcast_breaking_news(db, item)
+            await SmsNotifier.broadcast_breaking_news(db, item)
 
         await check_topic_tracking(db)
+
+        # Update last run time on success
+        try:
+            from src.database.models import SystemConfig
+            entry = db.query(SystemConfig).filter(SystemConfig.config_key == "last_news_cycle_run").first()
+            if not entry:
+                entry = SystemConfig(config_key="last_news_cycle_run")
+                db.add(entry)
+            entry.config_value = datetime.utcnow().isoformat()
+            db.commit()
+            logger.info(f"Last successful run time updated: {entry.config_value}")
+        except Exception as e:
+            logger.error(f"Failed to update last run time on success: {e}")
+            db.rollback()
 
     except Exception as e:
         logger.error(f"Error in news cycle: {e}")
@@ -237,7 +267,7 @@ async def run_news_cycle():
             db_cfg.close()
 
         logger.info("--------------------------------------------------")
-        logger.info("EXECUTED SUCCESSFULLY | NEXT CYCLE IN 15 MINUTES")
+        logger.info("FINISHED WITH ERRORS | NEXT CYCLE IN 15 MINUTES")
         logger.info("--------------------------------------------------")
 
 async def check_topic_tracking(db: Session):
@@ -283,7 +313,7 @@ async def check_topic_tracking(db: Session):
                     
                     if not already_notified:
                         logger.info(f"Topic Match Found! Notifying {user.phone} for '{article.title}'")
-                        NotificationManager.send_sms(
+                        await NotificationManager.send_sms(
                             user.phone, 
                             f"Tracked Intelligence: '{article.title}' matches your search. Read more: {article.url}"
                         )
@@ -339,8 +369,11 @@ def start_scheduler():
         loop.run_until_complete(run_news_cycle())
         loop.close()
         
-        logger.info(f"--- ✅ NEWS CYCLE SUCCESSFUL ---")
-        logger.info(f"--- 🕰️  STANDEBY: Next automated update at {next_run.strftime('%H:%M:%S')} ---")
+        end_time = datetime.now()
+        duration = (end_time - run_time).total_seconds()
+        
+        logger.info(f"--- ✅ NEWS CYCLE SUCCESSFUL (Took {duration:.1f} seconds) ---")
+        logger.info(f"--- 🕰️  STANDBY: Next automated update at {next_run.strftime('%H:%M:%S')} ---")
 
     def _run_async_twitter():
         import asyncio
@@ -349,14 +382,14 @@ def start_scheduler():
         loop.run_until_complete(run_twitter_only_cycle())
         loop.close()
 
-    # Full News Cycle (Run immediately on boot + every 15 minutes)
+    # FULL NEWS CYCLE (Every 3 minutes for high-speed updates)
     scheduler.add_job(
         _run_async_cycle, 
         'interval', 
         minutes=15, 
         next_run_time=run_date, 
         id='full_news_cycle',
-        max_instances=1, # Ensure only one cycle runs at a time to prevent DB lock
+        max_instances=3, 
         misfire_grace_time=3600,
         coalesce=True
     )

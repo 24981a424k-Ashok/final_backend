@@ -110,32 +110,30 @@ class RSSCollector:
 
     def fetch_recent_news(self) -> int:
         """
-        Fetch news from all configured RSS feeds from the last 24 hours.
+        Fetch news from all configured RSS feeds in parallel from the last 24 hours.
         Returns count of new articles saved.
         """
-        total_saved = 0
+        import concurrent.futures
         
-        for source_name, feed_url in self.feeds.items():
+        total_saved = 0
+        all_articles = []
+        
+        def fetch_feed(source_name, feed_url):
             try:
-                # Parse the feed
-                feed = feedparser.parse(feed_url)
+                # Parse the feed with a global timeout via socket (hacky but works for feedparser)
+                import socket
+                socket.setdefaulttimeout(10) # 10s per feed
                 
-                # Check for parsing errors
+                feed = feedparser.parse(feed_url)
                 if feed.bozo:
                     logger.warning(f"Potential issue parsing feed {source_name}: {feed.bozo_exception}")
 
-                # Process entries
-                articles = []
+                local_articles = []
                 for entry in feed.entries:
-                    # Extract published date
                     published_at = self._parse_date(entry)
-                    
-                    # Filter by last 24h
                     if self._is_recent(published_at):
-                        # Extract Image
                         image_url = self._extract_image(entry)
-                        
-                        articles.append({
+                        local_articles.append({
                             "source_id": source_name,
                             "source_name": feed.feed.get("title", source_name),
                             "title": entry.get("title"),
@@ -144,17 +142,25 @@ class RSSCollector:
                             "author": entry.get("author", "Unknown"),
                             "published_at": published_at,
                             "url_to_image": image_url,
-                            "country_code": self._detect_country(source_name) # Auto-tag country
+                            "country_code": self._detect_country(source_name)
                         })
-                
-                if articles:
-                   saved = self._save_articles(articles)
-                   total_saved += saved
-                   logger.info(f"Fetched {len(articles)} recent items from {source_name}, saved {saved} new.")
-                
+                return local_articles
             except Exception as e:
                 logger.error(f"Error fetching RSS feed {source_name}: {e}")
-                continue
+                return []
+
+        logger.info(f"Starting parallel fetch for {len(self.feeds)} RSS feeds...")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+            future_to_feed = {executor.submit(fetch_feed, name, url): name for name, url in self.feeds.items()}
+            for future in concurrent.futures.as_completed(future_to_feed):
+                articles = future.result()
+                if articles:
+                    all_articles.extend(articles)
+
+        if all_articles:
+            saved = self._save_articles(all_articles)
+            total_saved += saved
+            logger.info(f"Parallel RSS fetch complete. Total items found: {len(all_articles)}, Saved: {saved}")
                 
         return total_saved
 

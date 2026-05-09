@@ -6,6 +6,9 @@ UI_TRANSLATIONS = {
         "global": "[GLOBAL]",
         "who_affected": "👥 Who is Affected",
         "why_matters": "⚡ Why It Matters",
+        "key_points": "Key Points",
+        "why_it_matters": "Why it Matters",
+        "impact_analysis": "Impact Analysis",
         "ai_analysis": "AI Analysis",
         "just_now": "Just Now",
         "brief_title": "⭐ 60-Second Brief",
@@ -151,6 +154,9 @@ UI_TRANSLATIONS = {
         "global": "[గ్లోబల్]",
         "who_affected": "👥 ఎవరు ప్రభావితమవుతారు",
         "why_matters": "⚡ ఎందుకు ముఖ్యమైనది",
+        "key_points": "ముఖ్య అంశాలు",
+        "why_it_matters": "ఎందుకు ఇది ముఖ్యం",
+        "impact_analysis": "ప్రభావ విశ్లేషణ",
         "ai_analysis": "AI విశ్లేషణ",
         "just_now": "ఇప్పుడే",
         "brief_title": "⭐ 60-సెకన్ల సంక్షిప్త సమాచారం",
@@ -294,6 +300,9 @@ UI_TRANSLATIONS = {
         "global": "[वैश्विक]",
         "who_affected": "👥 कौन प्रभावित है",
         "why_matters": "⚡ यह क्यों मायने रखता है",
+        "key_points": "मुख्य बिंदु",
+        "why_it_matters": "यह क्यों मायने रखता है",
+        "impact_analysis": "प्रभाव विश्लेषण",
         "ai_analysis": "AI विश्लेषण",
         "just_now": "अभी-अभी",
         "brief_title": "⭐ 60-सेकंड की जानकारी",
@@ -404,6 +413,9 @@ UI_TRANSLATIONS = {
         "status_ready": "सिस्टम सक्रिय है",
         "intel_node": "नोड",
         "intelligence": "इंटेलिजेंस",
+        "listen_audi": "सुनें",
+        "stop_audi": "बंद करें",
+        "playing": "चल रहा है...",
         "choose_preferred_language": "अपनी न्यूज़ फीड के लिए अपनी पसंदीदा भाषा चुनें।",
         "skip_continue_english": "छोड़ें — अंग्रेजी में जारी रखें",
         "student_portal_title": "छात्र इंटेलिजेंस हब",
@@ -764,6 +776,64 @@ UI_TRANSLATIONS = {
 for lang in ["tamil", "kannada", "malayalam", "gujarati"]:
     if lang not in UI_TRANSLATIONS:
         UI_TRANSLATIONS[lang] = UI_TRANSLATIONS["english"]
+
+def get_ui_labels(lang: str) -> dict:
+    """Helper to fetch localized UI labels for backend-driven article objects."""
+    l = lang.lower()
+    if l == 'telugu':
+        return {
+            "key_points": "ముఖ్య అంశాలు",
+            "why_it_matters": "ఎందుకు ఇది ముఖ్యం",
+            "who_affected": "ఎవరు ప్రభావితమవుతారు"
+        }
+    elif l == 'hindi':
+        return {
+            "key_points": "मुख्य बिंदु",
+            "why_it_matters": "यह क्यों मायने रखता है",
+            "who_affected": "कौन प्रभावित है"
+        }
+    elif l == 'tamil':
+        return {
+            "key_points": "முக்கிய குறிப்புகள்",
+            "why_it_matters": "ஏன் இது முக்கியமானது",
+            "who_affected": "யார் பாதிக்கப்படுகிறார்கள்"
+        }
+    elif l == 'kannada':
+        return {
+            "key_points": "ಮುಖ್ಯಾಂಶಗಳು",
+            "why_it_matters": "ಇದು ಏಕೆ ಮುಖ್ಯ",
+            "who_affected": "ಯಾರು ಬಾಧಿತರು"
+        }
+    elif l == 'malayalam':
+        return {
+            "key_points": "പ്രധാന പോയിന്റുകൾ",
+            "why_it_matters": "എന്തുകൊണ്ട് ഇത് പ്രധാനമാണ്",
+            "who_affected": "ആരെ ബാധിക്കുന്നു"
+        }
+    elif l == 'bengali':
+        return {
+            "key_points": "মূল পয়েন্ট",
+            "why_it_matters": "কেন এটি গুরুত্বপূর্ণ",
+            "who_affected": "কারা প্রভাবিত"
+        }
+    elif l == 'gujarati':
+        return {
+            "key_points": "મુખ્ય મુદ્દાઓ",
+            "why_it_matters": "શા માટે તે મહત્વનું છે",
+            "who_affected": "કોણ પ્રભાવિત છે"
+        }
+    elif l == 'marathi':
+        return {
+            "key_points": "ठळक मुद्दे",
+            "why_it_matters": "हे महत्त्वाचे का आहे",
+            "who_affected": "कोणावर परिणाम झाला"
+        }
+    # Add more as needed
+    return {
+        "key_points": "Key Points",
+        "why_it_matters": "Why It Matters",
+        "who_affected": "Who is Affected"
+    }
 
 def get_ui_translations(lang: str) -> dict:
     if not lang:

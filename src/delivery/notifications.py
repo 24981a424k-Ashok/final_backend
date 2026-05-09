@@ -43,13 +43,13 @@ class NotificationManager:
         # Integration point for SendGrid/AWS SES/etc.
 
     @staticmethod
-    def send_sms(phone: str, body: str):
+    async def send_sms(phone: str, body: str):
         """Send SMS via Twilio helper."""
         if not phone: return
-        return twilio_helper.send_sms(phone, body)
+        return await twilio_helper.send_sms(phone, body)
 
     @staticmethod
-    def notify_subscribers(db: Session, category: str, news_title: str, news_url: str, news_id: int):
+    async def notify_subscribers(db: Session, category: str, news_title: str, news_url: str, news_id: int):
         """Find users subscribed to a category and notify them via all available channels. Ensures no duplicates."""
         from src.database.models import TrackNotification, User, Subscription
         
@@ -80,7 +80,7 @@ class NotificationManager:
             if user.email:
                 NotificationManager.send_email(user.email, f"AI News: {category}", f"{news_title}\nRead more: {news_url}")
             if user.phone:
-                NotificationManager.send_sms(user.phone, f"AI News [{category}]: {news_title}. {news_url}")
+                await NotificationManager.send_sms(user.phone, f"AI News [{category}]: {news_title}. {news_url}")
         
         db.commit()
 

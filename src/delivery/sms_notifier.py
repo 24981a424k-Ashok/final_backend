@@ -5,7 +5,7 @@ from src.utils.twilio_helper import twilio_helper
 
 class SmsNotifier:
     @staticmethod
-    def broadcast_breaking_news(db: Session, news_item: VerifiedNews):
+    async def broadcast_breaking_news(db: Session, news_item: VerifiedNews):
         """
         Send SMS alerts to ALL users with a phone number for major breaking news (Impact Score >= 9).
         """
@@ -27,7 +27,7 @@ class SmsNotifier:
         if test_number not in recipient_phones:
             logger.info(f"Adding default test recipient: {test_number}")
             try:
-                twilio_helper.send_sms(test_number, message_body)
+                await twilio_helper.send_sms(test_number, message_body)
             except Exception as e:
                 logger.error(f"Failed to send test SMS to {test_number}: {e}")
 
@@ -43,8 +43,8 @@ class SmsNotifier:
                 continue
 
             try:
-                sid = twilio_helper.send_sms(user.phone, message_body)
-                if sid:
+                success = await twilio_helper.send_sms(user.phone, message_body)
+                if success:
                     # Record that we notified them
                     db.add(TrackNotification(user_id=user.id, news_id=news_item.id))
                     count += 1

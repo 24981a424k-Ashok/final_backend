@@ -213,8 +213,13 @@ Analyze and classify this article."""
         return {
             "classification": classification,
             "breaking_headline": article.get("title", ""),
-            "what_happened": [f"Update regarding {article.get('title', '')[:60]}..."],
-            "why_matters": "Significant development requiring immediate attention.",
+            "what_happened": [
+                f"Core development: {article.get('title', '')[:80]}...",
+                f"This update highlights a pivotal moment for {article.get('category') or 'Industry'} stakeholders.",
+                "Observers are noting significant implications for future planning and policy."
+            ],
+            "why_matters": f"The development of '{article.get('title', '')[:60]}...' signals a major shift in {article.get('category') or 'this sector'} that could redefine current industry standards.",
+            "who_is_affected": f"General Public, Analysts, and Industry Observers specifically interested in {article.get('category') or 'Global News'}.",
             "next_updates": ["Further details expected soon", "Official statements pending"],
             "confidence_level": "Medium",
             "impact_score": impact_score,

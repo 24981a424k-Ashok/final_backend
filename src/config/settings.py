@@ -22,27 +22,40 @@ else:
 DATA_DIR.mkdir(exist_ok=True, parents=True)
 
 # 0. Base News Retrieval Keys
-NEWS_API_KEY = os.getenv("NEWS_API_KEY")
+NEWS_API_KEYS = list(filter(None, [
+    os.getenv("NEWS_API_KEY"),
+    *[os.getenv(f"NEWS_API_KEY_{i}") for i in range(1, 11)]
+]))
+# Deduplicate
+NEWS_API_KEYS = list(dict.fromkeys(NEWS_API_KEYS))
+NEWS_API_KEY = NEWS_API_KEYS[0] if NEWS_API_KEYS else None
+
 GNEWS_API_KEY = os.getenv("GNEWS_API_KEY")
 GNEWS_API_KEY_2 = os.getenv("GNEWS_API_KEY_2")
 
-# 1. OpenAI Pool (3 Keys)
-OPENAI_API_KEYS = [
-    os.getenv("OPENAI_KEY_1"),
-    os.getenv("OPENAI_KEY_2"),
-    os.getenv("OPENAI_KEY_3")
-]
-OPENAI_API_KEYS = [k for k in OPENAI_API_KEYS if k]
+# 1. OpenAI Pool (Up to 20 Keys for High-Performance Translation & Analysis)
+OPENAI_API_KEYS = list(filter(None, [
+    os.getenv(f"OPENAI_KEY_{i}") for i in range(1, 21)
+]))
+# Deduplicate
+OPENAI_API_KEYS = list(dict.fromkeys(OPENAI_API_KEYS))
 OPENAI_API_KEY = OPENAI_API_KEYS[0] if OPENAI_API_KEYS else None
 
-# 2. Groq Pool (3 Keys)
-GROQ_API_KEYS = [
-    os.getenv("GROQ_KEY_1"),
-    os.getenv("GROQ_KEY_2"),
-    os.getenv("GROQ_KEY_3")
-]
-GROQ_API_KEYS = [k for k in GROQ_API_KEYS if k]
+# 2. Groq Pool (Up to 15 Keys for High-Performance Fallback)
+GROQ_API_KEYS = list(filter(None, [
+    os.getenv(f"GROQ_KEY_{i}") for i in range(1, 16)
+]))
+# Deduplicate
+GROQ_API_KEYS = list(dict.fromkeys(GROQ_API_KEYS))
 GROQ_API_KEY = GROQ_API_KEYS[0] if GROQ_API_KEYS else None
+
+# Explicit Premium Exports for Targeting
+OPENAI_KEY_1 = os.getenv("OPENAI_KEY_1")
+OPENAI_KEY_2 = os.getenv("OPENAI_KEY_2")
+OPENAI_KEY_3 = os.getenv("OPENAI_KEY_3")
+GROQ_KEY_1 = os.getenv("GROQ_KEY_1")
+GROQ_KEY_2 = os.getenv("GROQ_KEY_2")
+CRICKET_API_KEY = os.getenv("CRICKET_API_KEY")
 
 # Specialized Fallbacks (Maintained for legacy compatibility but effectively mapped to pools)
 GROQ_KEY_TELUGU = GROQ_API_KEY
@@ -86,8 +99,8 @@ else:
 _log_url = DATABASE_URL
 if "@" in _log_url:
     _log_url = f"{_log_url.split('://')[0]}://****@{_log_url.split('@')[-1]}"
-print(f"[BOOT] 📁 DATA_DIR: {DATA_DIR.resolve().absolute()}")
-print(f"[BOOT] 🚀 DATABASE: {_log_url}")
+print(f"[BOOT] DATA_DIR: {DATA_DIR.resolve().absolute()}")
+print(f"[BOOT] DATABASE: {_log_url}")
 
 VECTOR_DB_PATH = DATA_DIR / "vector_store.index"
 

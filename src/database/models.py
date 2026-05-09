@@ -54,6 +54,7 @@ class VerifiedNews(Base):
     short_term_impact = Column(Text, nullable=True)
     long_term_impact = Column(Text, nullable=True)
     sentiment = Column(String)
+    lang = Column(String, default='english', index=True) # Source language
     
     is_fake = Column(Boolean, default=False)
     flag_count = Column(Integer, default=0)

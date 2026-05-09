@@ -36,15 +36,20 @@ def initialize_firebase():
                     if sj.startswith('"') and sj.endswith('"'): sj = sj[1:-1]
                     
                     # Fix escaped internal quotes and handle common shell escape artifacts
-                    sj = sj.replace('\\"', '"')
+                    if '\\"' in sj:
+                        sj = sj.replace('\\"', '"')
                     
-                    # Convert literal \n or \\n to actual newlines if json.loads fails initially
+                    # CRITICAL FIX: Replace literal newlines with escaped newlines (\n)
+                    # JSON strings cannot contain literal newlines, only escaped ones.
+                    # This resolves the "Invalid control character" error.
+                    sj = sj.replace('\n', '\\n').replace('\r', '\\r')
+
                     try:
                         cred_dict = json.loads(sj)
                     except json.JSONDecodeError:
                         import re
-                        # Attempt to fix escaped newlines that are breaking the JSON
-                        sj = re.sub(r'\\+n', '\n', sj)
+                        # Attempt to fix double-escaped newlines if they still exist
+                        sj = re.sub(r'\\\\+n', '\\n', sj)
                         # Remove accidental double-escaped backslashes
                         sj = sj.replace('\\\\', '\\')
                         cred_dict = json.loads(sj)
@@ -156,4 +161,15 @@ def get_messaging():
     return messaging
 
 def get_auth():
+    initialize_firebase()
     return auth
+
+def create_custom_token(uid: str):
+    """Generate a custom token for a specific user UID."""
+    try:
+        initialize_firebase()
+        custom_token = auth.create_custom_token(uid, app=_firebase_app)
+        return custom_token.decode('utf-8') if isinstance(custom_token, bytes) else custom_token
+    except Exception as e:
+        logger.error(f"Failed to create custom token for {uid}: {e}")
+        return None

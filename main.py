@@ -44,6 +44,14 @@ from src.database.models import init_db
 LAST_CYCLE_RUN = "Never"
 DB_TYPE = "Unknown"
 
+# Suppress noisy polling logs (No longer needed for cricket, but kept structure for future noisy endpoints if needed)
+class EndpointFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Template for future noisy endpoints
+        return True
+
+logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting AI News Intelligence Agent (Backend API)...")
@@ -126,10 +134,15 @@ async def system_health():
     import datetime
     
     db = SessionLocal()
+    last_run = "Never"
     try:
         count = db.query(VerifiedNews).count()
         last_article = db.query(VerifiedNews).order_by(VerifiedNews.id.desc()).first()
         db_status = "Connected"
+        
+        cfg = db.query(SystemConfig).filter(SystemConfig.config_key == "last_news_cycle_run").first()
+        if cfg:
+            last_run = cfg.config_value
     except Exception as e:
         count = 0
         last_article = None
@@ -148,7 +161,7 @@ async def system_health():
             "last_article_time": last_article.created_at.isoformat() if last_article and hasattr(last_article, 'created_at') else "Unknown"
         },
         "scheduler": {
-            "last_run": db.query(SystemConfig).filter(SystemConfig.config_key == "last_news_cycle_run").first().config_value if db.query(SystemConfig).filter(SystemConfig.config_key == "last_news_cycle_run").first() else "Never",
+            "last_run": last_run,
             "interval": "15 Minutes"
         }
     }

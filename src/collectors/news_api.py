@@ -1,117 +1,110 @@
 from datetime import datetime, timedelta
 import logging
 from typing import List, Dict, Any
+import time
 from newsapi import NewsApiClient
-from src.config.settings import NEWS_API_KEY
+from src.config.settings import NEWS_API_KEYS
 from src.database.models import SessionLocal, RawNews
 
 logger = logging.getLogger(__name__)
 
 class NewsCollector:
+    _key_status = {} # Class-level health tracker
+
     def __init__(self):
-        self.api_key = NEWS_API_KEY
-        if not self.api_key:
-            logger.warning("NewsAPI Key is missing!")
-            self.client = None
+        self.keys = NEWS_API_KEYS
+        if not self.keys:
+            logger.warning("NewsAPI Keys are missing!")
+
+    def _get_best_client(self):
+        """Rotate through keys to find one that isn't on cooldown."""
+        for key in self.keys:
+            status = self._key_status.get(key, {"state": "active", "reset_at": 0})
+            if status["state"] == "active" or time.time() > status["reset_at"]:
+                self._key_status[key] = {"state": "active", "reset_at": 0}
+                return NewsApiClient(api_key=key), key
+        return None, None
+
+    def _mark_key_limited(self, key: str, hours: int = 24, dead: bool = False):
+        """Cool down or kill a key."""
+        if dead:
+            logger.error(f"NewsAPI: Key {key[:8]}... is INVALID. Disabling for this session.")
+            self._key_status[key] = {"state": "dead", "reset_at": time.time() + (72 * 3600)}
         else:
-            self.client = NewsApiClient(api_key=self.api_key)
+            logger.warning(f"NewsAPI: Key {key[:8]}... hit quota. Cooling down for {hours}h.")
+            self._key_status[key] = {
+                "state": "limited",
+                "reset_at": time.time() + (hours * 3600)
+            }
 
     def fetch_recent_news(self, query: str = None, domains: str = None, categories: str = None) -> int:
         """
         Fetch news from the last 24 hours and save to DB.
-        Returns count of new articles saved.
+        Uses key pooling to maximize quota.
         """
-        if not self.client:
-            logger.error("NewsAPI client not initialized.")
-            return 0
-
-        # Time range: last 24 hours
-        to_date = datetime.utcnow()
-        from_date = to_date - timedelta(hours=24)
-        
-        try:
-            # We can customize this to fetch top headlines or everything
-            # For this agent, we might want 'everything' for breadth or 'top-headlines' for quality
-            # Let's start with top headlines for major categories
-            
-            # Fetch all top headlines in one call to save quota (100 articles)
-            response = self.client.get_top_headlines(
-                language='en',
-                page_size=70  # General headlines
-            )
-            
-            # Dedicated Business Fetch
-            business_response = self.client.get_top_headlines(
-                language='en',
-                category='business',
-                country='in',
-                page_size=30
-            )
-
-            # Dedicated Sports Fetch
-            sports_response = self.client.get_top_headlines(
-                language='en',
-                category='sports',
-                page_size=30
-            )
-
-            # 4. Search for recent sports and business news specifically to broaden density
-            # DISABLED for FREE TIER: get_everything is restricted
-            search_response = {'status': 'ok', 'articles': []}
-            # search_response = self.client.get_everything(
-            #     q='sports OR "IPL" OR "Cricket" OR "Football"',
-            #     language='en',
-            #     sort_by='publishedAt',
-            #     page_size=40
-            # )
-
-            biz_search = {'status': 'ok', 'articles': []}
-            # biz_search = self.client.get_everything(
-            #     q='business OR economy OR startup OR "Stock Market"',
-            #     language='en',
-            #     sort_by='publishedAt',
-            #     page_size=40
-            # )
+        while True:
+            client, active_key = self._get_best_client()
+            if not client:
+                logger.error("All NewsAPI keys are currently exhausted, invalid, or limited.")
+                return 0
 
             all_articles = []
-            if response['status'] == 'ok':
-                all_articles.extend(response.get('articles', []))
             
-            if business_response['status'] == 'ok':
-                all_articles.extend(business_response.get('articles', []))
-            
-            if sports_response['status'] == 'ok':
-                all_articles.extend(sports_response.get('articles', []))
-
-            if search_response['status'] == 'ok':
-                all_articles.extend(search_response.get('articles', []))
-
-            if biz_search['status'] == 'ok':
-                all_articles.extend(biz_search.get('articles', []))
-            
-            # 5. Dedicated Country Fetch (Japan, USA)
-            target_countries = ['jp', 'us']
-            for country_code in target_countries:
+            try:
+                # 1. General Top Headlines
                 try:
-                    country_res = self.client.get_top_headlines(
-                        language='en' if country_code != 'jp' and country_code != 'cn' else None,
+                    res = client.get_top_headlines(language='en', page_size=70)
+                    if res.get('status') == 'ok':
+                        all_articles.extend(res.get('articles', []))
+                    elif res.get('code') == 'apiKeyInvalid':
+                        self._mark_key_limited(active_key, dead=True)
+                        continue # Try next key
+                except Exception as e:
+                    if "rateLimited" in str(e) or "429" in str(e) or "403" in str(e):
+                        self._mark_key_limited(active_key)
+                        return 0 # Stop this run
+                    if "apiKeyInvalid" in str(e):
+                        self._mark_key_limited(active_key, dead=True)
+                        continue # Try next key
+                    logger.error(f"NewsAPI General failed: {e}")
+
+            # 2. Business Headlines
+            try:
+                res = client.get_top_headlines(language='en', category='business', country='in', page_size=30)
+                if res['status'] == 'ok':
+                    all_articles.extend(res.get('articles', []))
+            except Exception as e:
+                logger.warning(f"NewsAPI Business failed: {e}")
+
+            # 3. Sports Headlines
+            try:
+                res = client.get_top_headlines(language='en', category='sports', page_size=30)
+                if res['status'] == 'ok':
+                    all_articles.extend(res.get('articles', []))
+            except Exception as e:
+                logger.warning(f"NewsAPI Sports failed: {e}")
+
+            # 4. Target Countries
+            for country_code in ['jp', 'us']:
+                try:
+                    res = client.get_top_headlines(
+                        language='en' if country_code != 'jp' else None,
                         country=country_code,
                         page_size=20
                     )
-                    if country_res['status'] == 'ok':
-                        # Tag these articles with the country code before saving
-                        articles = country_res.get('articles', [])
+                    if res['status'] == 'ok':
+                        articles = res.get('articles', [])
                         for a in articles:
                             a['target_country'] = country_code
                         all_articles.extend(articles)
                 except Exception as ce:
-                    logger.warning(f"Failed to fetch news for {country_code}: {ce}")
+                    logger.warning(f"NewsAPI {country_code} failed: {ce}")
 
             saved_count = self._save_articles(all_articles)
             return saved_count
             
         except Exception as e:
-            logger.error(f"Error fetching news: {e}")
+            logger.error(f"Error in NewsAPI collection cycle: {e}")
             return 0
 
     def _save_articles(self, articles: List[Dict[str, Any]]) -> int:

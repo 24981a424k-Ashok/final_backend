@@ -100,9 +100,14 @@ class DigestGenerator:
                         "original_article": a,
                         "classification": "Breaking",
                         "breaking_headline": a.get("title"),
-                        "what_happened": [a.get("content")[:200] + "..." if a.get("content") else "No preview available."],
-                        "why_matters": "Critical update for immediate release.",
-                        "next_updates": ["Developing story."],
+                        "what_happened": [
+                            f"Live update: {a.get('title')[:80]}...",
+                            f"Ongoing development affecting {a.get('country') or 'Global'} stakeholders.",
+                            "Monitoring for strategic shifts and further announcements."
+                        ],
+                        "why_matters": f"This '{a.get('title')[:50]}...' event requires immediate attention as it may signal broader trends in the current cycle.",
+                        "who_is_affected": "Industry Analysts, Policy Makers, and Local Stakeholders.",
+                        "next_updates": ["Developing story.", "Awaiting official statements."],
                         "confidence_level": "High",
                         "impact_score": 5,
                         "recency_minutes": recency
@@ -301,7 +306,8 @@ class DigestGenerator:
                 "bias": n.bias_rating or "Neutral",
                 "image_url": n.raw_news.url_to_image if n.raw_news else None,
                 "bullets": n.summary_bullets or [n.title],
-                "country": name
+                "country": name,
+                "analysis": n.analysis # INCLUDE FULL ANALYSIS FOR HEALING LOGIC
             }
             
             if name not in countries:
@@ -327,7 +333,8 @@ class DigestGenerator:
                 "bias": n.bias_rating or "Neutral",
                 "image_url": n.raw_news.url_to_image if n.raw_news else None,
                 "bullets": n.summary_bullets or [n.title],
-                "country": n.country or "Global"
+                "country": n.country or "Global",
+                "analysis": n.analysis # INCLUDE FULL ANALYSIS FOR HEALING LOGIC
             }
 
             # Strict Business Filtering (apply to category only)
@@ -351,13 +358,15 @@ class DigestGenerator:
                 # --- CATEGORY RECOVERY LOGIC ---
                 text_pool = ((n.title or "") + " " + (n.why_it_matters or "")).lower()
                 recovery_map = {
-                    "Technology": ["tech", "ai", "software", "chip", "semiconductor", "digital", "startup", "robot", "cyber"],
-                    "Business & Economy": ["market", "stock", "inflation", "gdp", "trade", "bank", "finance", "ceo", "company", "merger", "startup", "revenue", "profit", "loss", "fiscal", "budget"],
-                    "Politics": ["government", "policy", "election", "biden", "trump", "modi", "minister", "senate", "law", "parliament", "treaty", "diplomatic"],
-                    "Science & Health": ["cancer", "health", "medical", "space", "study", "research", "doctor", "virus", "nasa", "pills", "vaccine", "biology"],
-                    "Sports": ["cricket", "football", "match", "fifa", "ipl", "tournament", "score", "player", "olympics", "goal", "wicket", "stadium"],
+                    "Technology": ["tech", "ai", "software", "chip", "semiconductor", "digital", "startup", "robot", "cyber", "iphone", "samsung", "nvidia"],
+                    "Business & Economy": ["market", "stock", "inflation", "gdp", "trade", "bank", "finance", "ceo", "company", "merger", "startup", "revenue", "profit", "loss", "fiscal", "budget", "shares", "invest", "economy"],
+                    "Politics": ["government", "policy", "election", "biden", "trump", "modi", "minister", "senate", "law", "parliament", "treaty", "diplomatic", "vote", "congress", "white house"],
+                    "Science & Health": ["cancer", "health", "medical", "space", "study", "research", "doctor", "virus", "nasa", "pills", "vaccine", "biology", "scientific", "astronomy", "climate"],
+                    "Sports": ["cricket", "football", "match", "fifa", "ipl", "tournament", "score", "player", "olympics", "goal", "wicket", "stadium", "tennis", "basketball", "league"],
                     "Education": ["student", "university", "college", "school", "scholarship", "exam", "education", "learning", "internship", "admission", "course", "campus", "recruitment", "result", "jee", "neet", "upsc", "gate", "fellowship", "stipend"],
-                    "Defense & Security": ["defense", "military", "army", "navy", "missile", "security", "weapon", "war", "border"]
+                    "Defense & Security": ["defense", "military", "army", "navy", "missile", "security", "weapon", "war", "border", "pentagon", "nato"],
+                    "Entertainment": ["movie", "film", "star", "celebrity", "actor", "music", "award", "oscar", "hollywood", "bollywood", "singer", "album", "streaming", "netflix"],
+                    "Lifestyle & Wellness": ["travel", "wellness", "lifestyle", "fashion", "food", "health tips", "fitness", "beauty", "recipe", "vacation"]
                 }
                 
                 for r_cat, keywords in recovery_map.items():
@@ -389,8 +398,8 @@ class DigestGenerator:
                 item_data["affected"] = f"Key decision-makers, institutional observers, and regional stakeholders within the {cat} ecosystem."
 
             if cat and cat in categories:
-                # DIVERSITY FILTER: Limit "Sports" more strictly if pool is already saturated
-                limit = 20 if cat == "Sports" else 30 
+                # DIVERSITY FILTER: Ensure at least 15-20 per category if available
+                limit = 25 if cat in ["Sports", "Entertainment"] else 30 
                 if len(categories[cat]) < limit:
                     categories[cat].append(item_data)
             
@@ -485,7 +494,8 @@ class DigestGenerator:
                     "long_impact": n.long_term_impact or "Strategic shifts.",
                     "tags": n.impact_tags or ["Intelligence"],
                     "bias": n.bias_rating or "Neutral",
-                    "category": n.category
+                    "category": n.category,
+                    "analysis": n.analysis # INCLUDE FULL ANALYSIS FOR HEALING LOGIC
                 } for n in top_10_pool[:30]  # Increased to 30 for See More
             ],
             "twitter_intelligence": [

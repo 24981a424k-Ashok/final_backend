@@ -27,23 +27,21 @@ class ExamGenerator:
         return [n.to_dict() for n in news]
 
 
-    def generate_mock_test(self, db: Session) -> Dict:
-        """Generate a high-accuracy mock test from the last 24 hours of intelligence."""
+    async def generate_mock_test(self, db: Session) -> Dict:
+        return await self.generate_from_news(db)
+
+    async def generate_from_news(self, db: Session) -> Dict:
+        """Alias for generate_mock_test to fix attribute error."""
         news_items = self.get_recent_news(db)
         
         if not news_items:
-            # Fallback to latest digest if no specific window news found
+            # Fallback ONLY to latest digest if it was published in the last 24h
             latest = db.query(DailyDigest).order_by(DailyDigest.date.desc()).first()
-            if latest:
+            if latest and latest.date >= (datetime.utcnow() - timedelta(hours=24)):
                 news_items = latest.content_json.get('top_stories', [])
 
         if not news_items:
-            # Absolute fallback to latest 15 verified news regardless of time
-            news = db.query(VerifiedNews).order_by(VerifiedNews.created_at.desc()).limit(15).all()
-            news_items = [n.to_dict() for n in news]
-
-        if not news_items:
-            return {"error": "Intelligence scan found no fresh news. Please run a news cycle first."}
+            return {"status": "error", "message": "Intelligence scan found no fresh news (last 24h). Please run a news cycle first."}
 
         # Perfection: Ensure diverse category representation
         categorized_news = defaultdict(list)
@@ -107,7 +105,11 @@ class ExamGenerator:
         """
         
         try:
-            response = self.llm.get_completion(prompt)
+            # Perfection: Use the async get_completion method correctly
+            response = await self.llm.get_completion(
+                system_prompt="You are an AI Current Affairs Exam Expert. Output ONLY valid JSON.",
+                user_prompt=prompt
+            )
             # Clean JSON if needed
             response = response.replace("```json", "").replace("```", "").strip()
             return json.loads(response)
