@@ -501,66 +501,75 @@ async def api_bootstrap(
         }
 
         now_utc = datetime.utcnow()
-        cutoff = now_utc - timedelta(hours=48) # Strict 48 hours back to guarantee fresh news
+        cutoff = now_utc - timedelta(hours=48)
         def _fresh(item):
+            """Returns True if article is fresh (< 48h). Articles with no date are KEPT."""
             pub = item.get("published_at") or item.get("created_at")
-            if pub and isinstance(pub, str):
-                try:
-                    # Clean up common ISO formats to ensure robust parsing
-                    clean_pub = pub.replace("Z", "+00:00")
-                    if "." in clean_pub and "+" not in clean_pub:
-                         clean_pub = clean_pub.split(".")[0] + "+00:00"
-                    
-                    parsed_date = datetime.fromisoformat(clean_pub)
-                    # If parsed date is naive, make it UTC-aware
-                    if parsed_date.tzinfo is None:
-                        from datetime import timezone
-                        parsed_date = parsed_date.replace(tzinfo=timezone.utc)
-                    
-                    aware_cutoff = cutoff.replace(tzinfo=timezone.utc) if cutoff.tzinfo is None else cutoff
-                    
-                    return parsed_date > aware_cutoff
-                except Exception as e: 
-                    return False # Reject invalid dates to prevent showing ancient articles
-            return False # Reject articles without dates
+            if not pub:
+                return True  # No date = keep it (don't punish articles for missing metadata)
+            if not isinstance(pub, str):
+                return True
+            try:
+                clean_pub = pub.replace("Z", "+00:00")
+                if "." in clean_pub and "+" not in clean_pub:
+                    clean_pub = clean_pub.split(".")[0] + "+00:00"
+                parsed_date = datetime.fromisoformat(clean_pub)
+                if parsed_date.tzinfo is None:
+                    from datetime import timezone
+                    parsed_date = parsed_date.replace(tzinfo=timezone.utc)
+                aware_cutoff = cutoff.replace(tzinfo=timezone.utc) if cutoff.tzinfo is None else cutoff
+                return parsed_date > aware_cutoff
+            except Exception:
+                return True  # On parse error, keep the article
 
-        # Dashboard Perfection: Aggressive English-only filtering
+        # Main Dashboard: English-only by default
+        # Accept: lang is None, lang='english', OR title is mostly latin characters
         def _is_mostly_english(text):
             if not text: return True
-            # Count Latin characters vs others
             latin = sum(1 for c in str(text) if ord(c) < 128)
             total = len(str(text))
             if total == 0: return True
-            return (latin / total) > 0.85
+            return (latin / total) > 0.80  # Slightly relaxed from 0.85
 
         if not lang or lang.lower() == 'english':
             if not country and not category:
                 for sec in ["top_stories", "breaking_news", "trending_news", "brief"]:
                     if sec in digest_data and digest_data[sec]:
                         digest_data[sec] = [
-                            s for s in digest_data[sec] 
-                            if (s.get("lang") or "english").lower() == 'english' and _is_mostly_english(s.get("title"))
+                            s for s in digest_data[sec]
+                            # Accept: no lang set (assume english), or explicitly english, AND title looks english
+                            if (s.get("lang") or "english").lower() in ('english', 'en')
+                            and _is_mostly_english(s.get("title"))
                         ]
-        
+
         # Ensure section existence for UI stability
         for sec in ["top_stories", "breaking_news", "trending_news", "brief"]:
             if sec not in digest_data: digest_data[sec] = []
-            
-        # HEAL: If Breaking News or Trending is empty, backfill from Top Stories
-        if not digest_data.get("breaking_news") and digest_data.get("top_stories"):
-            digest_data["breaking_news"] = digest_data["top_stories"][:15]
-        if not digest_data.get("trending_news") and digest_data.get("top_stories"):
-            digest_data["trending_news"] = digest_data["top_stories"][15:25]
-        
-        # Freshness and Normalization
+
+        # Freshness filter FIRST (before backfill)
         for sec in ["top_stories", "breaking_news", "trending_news", "brief"]:
             if sec in digest_data and digest_data[sec]:
                 digest_data[sec] = [s for s in digest_data[sec] if _fresh(s)]
+
+        # HEAL: Backfill AFTER freshness filter so sections are never empty
+        if not digest_data.get("breaking_news") and digest_data.get("top_stories"):
+            digest_data["breaking_news"] = digest_data["top_stories"][:15]
+        if not digest_data.get("trending_news") and digest_data.get("top_stories"):
+            digest_data["trending_news"] = digest_data["top_stories"][15:30]
+        # Last resort: if top_stories also empty, pull direct from DB
+        if not digest_data.get("breaking_news"):
+            live_breaking = db.query(VerifiedNews).filter(
+                or_(VerifiedNews.lang == 'english', VerifiedNews.lang == None)
+            ).order_by(VerifiedNews.impact_score.desc(), VerifiedNews.id.desc()).limit(15).all()
+            digest_data["breaking_news"] = [normalize_article_data(n.to_dict()) for n in live_breaking]
+
+        # Normalize all sections
+        from src.utils.ui_trans import get_ui_labels
+        ui = get_ui_labels(lang or "english")
+        for sec in ["top_stories", "breaking_news", "trending_news", "brief"]:
+            if sec in digest_data:
                 for s in digest_data[sec]:
                     normalize_article_data(s)
-                    # Add UI Labels for TTS stability in non-English modes
-                    from src.utils.ui_trans import get_ui_labels
-                    ui = get_ui_labels(lang or "english")
                     s["ui_key_points"] = ui.get("key_points", "Key Points")
                     s["ui_why_it_matters"] = ui.get("why_it_matters", "Why It Matters")
                     s["ui_who_affected"] = ui.get("who_affected", "Who is Affected")
