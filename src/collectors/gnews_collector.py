@@ -45,7 +45,7 @@ class GNewsCollector:
             'de': '("EU economy" OR "Industry news" OR "Energy policy" OR "Climate policy")',
             'jp': '("Technology" OR "Robotics" OR "Market" OR "Currency")',
             'sg': '("Startup" OR "Fintech" OR "ASEAN economy")',
-            'in': '("Policy" OR "Market" OR "Economy" OR "Tech" OR "Startup" OR "Infrastructure")'
+            'in': '("Policy" OR "Market" OR "Economy" OR "Tech" OR "Startup" OR "Infrastructure" OR "Education" OR "Scholarship" OR "Entrance Exam" OR "Student News")'
         }
 
         # OPTIMIZATION: Rotate countries to avoid Rate Limits (now 200 req/day with 2 keys)

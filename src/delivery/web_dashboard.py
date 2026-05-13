@@ -1977,10 +1977,10 @@ async def _fetch_newsdata_student_articles(db: Session, country_code: str):
     
     # Categories to fetch
     fetch_cats = {
-        "Scholarships & Internships": "scholarship OR internship OR fellowship",
-        "Exams & Results": "exam result OR board exam OR competitive exam",
-        "Admissions & Courses": "college admission OR university admission",
-        "Career & Jobs": "job vacancy OR recruitment OR fresher jobs"
+        "Scholarships & Internships": "(scholarship OR internship OR fellowship OR stipend) AND (india OR global)",
+        "Exams & Results": "(JEE OR NEET OR CUET OR UPSC OR SSC OR 'Board Exam' OR 'Exam Result')",
+        "Admissions & Courses": "('College Admission' OR 'University Admission' OR 'Study Abroad' OR 'New Course')",
+        "Career & Jobs": "('Job Vacancy' OR 'Recruitment' OR 'Fresher Job' OR 'Placement' OR 'Hiring')"
     }
     
     results = []
@@ -2030,6 +2030,30 @@ async def _fetch_newsdata_student_articles(db: Session, country_code: str):
         results_lists = await asyncio.gather(*tasks)
         for res_list in results_lists:
             results.extend(res_list)
+
+    # 2. FALLBACK: Search internal DB for Education/Student category
+    try:
+        from src.database.models import VerifiedNews
+        internal_news = db.query(VerifiedNews).filter(
+            (VerifiedNews.category.ilike('%Education%')) | (VerifiedNews.sub_category.ilike('%Student%')),
+            VerifiedNews.is_fake == False
+        ).order_by(VerifiedNews.published_at.desc()).limit(15).all()
+        
+        for news in internal_news:
+            art_url = news.url
+            if art_url in seen_urls: continue
+            seen_urls.add(art_url)
+            
+            # Convert DB model to dict compatible with the student section
+            d = news.to_dict()
+            d['id'] = news.id
+            d['image_url'] = news.image_url or get_fallback_image(news.title, "Education")
+            d['urgency'] = "Medium"
+            results.append(d)
+            
+        logger.info(f"Student Section: Total {len(results)} articles (including {len(internal_news)} from DB)")
+    except Exception as e:
+        logger.error(f"Internal student fallback failed: {e}")
             
     return results
 

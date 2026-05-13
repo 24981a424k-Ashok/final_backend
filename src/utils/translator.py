@@ -48,6 +48,32 @@ class NewsTranslator:
             logger.info(f"NewsTranslator initialized with {len(self.all_keys)} keys.")
         
         self._clients: Dict[str, AsyncOpenAI] = {}
+        
+        # 3. External Cache (for items with ID 0)
+        from pathlib import Path
+        self.external_cache_path = settings.DATA_DIR / "external_translations.json"
+        self._external_cache = {}
+        self._load_external_cache()
+
+    def _load_external_cache(self):
+        try:
+            if self.external_cache_path.exists():
+                with open(self.external_cache_path, "r", encoding="utf-8") as f:
+                    self._external_cache = json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load external translation cache: {e}")
+
+    def _save_external_cache(self):
+        try:
+            # Basic pruning: keep it under 5000 items
+            if len(self._external_cache) > 5000:
+                keys = list(self._external_cache.keys())
+                self._external_cache = {k: self._external_cache[k] for k in keys[-3000:]}
+                
+            with open(self.external_cache_path, "w", encoding="utf-8") as f:
+                json.dump(self._external_cache, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save external translation cache: {e}")
 
     async def verify_all_keys(self) -> Dict[str, Any]:
         """
@@ -151,26 +177,41 @@ class NewsTranslator:
         return None, None
 
     def _clean_json(self, text_content):
-        """Search for and extract valid JSON from a mixed-text response."""
+        """Search for and extract valid JSON from a mixed-text response with high recovery."""
         if not text_content: return None
         try:
             clean = text_content.strip()
+            # Remove Markdown code blocks if present
             if "```json" in clean:
                 clean = clean.split("```json")[1].split("```")[0].strip()
             elif "```" in clean:
                 clean = clean.split("```")[1].strip()
             
+            # Find the first { and last }
             start = clean.find('{')
             end = clean.rfind('}')
             if start != -1 and end != -1:
                 clean = clean[start:end+1]
             
+            # Remove trailing commas before closing braces/brackets
             import re
             clean = re.sub(r',\s*([\]}])', r'\1', clean)
+            
+            # Handle common LLM escape character issues
+            clean = clean.replace('\\"', '"').replace('\\n', ' ')
+            # Fix double quotes inside strings (basic attempt)
+            # clean = re.sub(r'(?<![:\[,])"(?![:,\]])', "'", clean) 
+
             return json.loads(clean)
         except Exception as e:
-            logger.warning(f"JSON extraction failed: {e}. Raw: {text_content[:100]}...")
-            return None
+            # Layer 2: Attempt even more aggressive cleaning if Layer 1 fails
+            try:
+                # Replace newlines in strings which break json.loads
+                clean = re.sub(r'\n', ' ', clean)
+                return json.loads(clean)
+            except:
+                logger.warning(f"JSON extraction failed: {e}. Raw: {text_content[:150]}...")
+                return None
 
     def _mark_key_limited(self, key, is_dead=False):
         if is_dead:
@@ -224,7 +265,7 @@ class NewsTranslator:
                             {"role": "user", "content": text}
                         ],
                         temperature=0.1,
-                        timeout=15
+                        timeout=30 # Increased for stability
                     )
                     return response.choices[0].message.content.strip()
                 except Exception as e:
@@ -303,6 +344,22 @@ class NewsTranslator:
                                     "is_cached": True
                                 })
                                 continue
+                        
+                    # 2. Check External Cache (URL-based) if ID is 0
+                    if str(article_id) == "0" or not article_id:
+                        url = story.get("url")
+                        cache_key = f"{url}_{target_lang}" if url else None
+                        if cache_key and cache_key in self._external_cache:
+                            cached_val = self._external_cache[cache_key]
+                            story.update({
+                                "title": cached_val.get("t"),
+                                "headline": cached_val.get("t"),
+                                "bullets": cached_val.get("b"),
+                                "why": cached_val.get("w"),
+                                "affected": cached_val.get("a"),
+                                "is_cached": True
+                            })
+                            continue
                     u_indices.append(idx)
             finally:
                 db.close()
@@ -339,7 +396,7 @@ class NewsTranslator:
                                 {"role": "user", "content": f"Translate these to {target_lang}:\n{articles_text}"}
                             ],
                             temperature=0.1,
-                            timeout=30
+                            timeout=60 # High timeout for batch stability
                         )
                         raw_result = self._clean_json(response.choices[0].message.content.strip())
                         if raw_result and raw_result.get("translated"):
@@ -391,6 +448,18 @@ class NewsTranslator:
                             }
                             article.translation_cache = cache
                             db.commit()
+                        
+                        # 2. Save External Cache
+                        if str(orig.get("id")) == "0":
+                            url = orig.get("url")
+                            if url:
+                                cache_key = f"{url}_{target_lang}"
+                                self._external_cache[cache_key] = {
+                                    "t": tr.get("t"), "b": tr.get("b"), 
+                                    "w": tr.get("w"), "a": tr.get("a")
+                                }
+                    
+                    self._save_external_cache()
                 finally:
                     db.close()
 

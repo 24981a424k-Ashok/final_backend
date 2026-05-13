@@ -46,8 +46,9 @@ RSS_FEEDS = {
     # "webmd": "https://rssfeeds.webmd.com/rss/rss.aspx?RSSSource=rss_public",  # Connection issues
     
     # 9. Education
-    # "education-week": "https://www.edweek.org/rss",  # Malformed XML
-    # "chronicle-higher-ed": "https://www.chronicle.com/rss",  # Malformed XML
+    "hindustantimes-edu": "https://www.hindustantimes.com/feeds/rss/education/rssfeed.xml",
+    "career-india": "https://www.careerindia.com/rss/career-india-fb.xml",
+    "indiatoday-edu": "https://www.indiatoday.in/rss/1206578",
     
     # 10. Entertainment
     "variety": "https://variety.com/feed/",
