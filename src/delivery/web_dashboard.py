@@ -153,14 +153,14 @@ def normalize_article_data(data: dict, strip_large_fields: bool = False):
     
     # 1. Normalize bullet lists (handle both 'summary_bullets' and 'bullets' keys)
     bullets_key = "summary_bullets" if "summary_bullets" in data else "bullets"
+    article_cat = data.get("category", "General")
     data[bullets_key] = _deep_normalize_list(data.get(bullets_key, []))
     
     # ENSURE AT LEAST 3 BULLETS
     if not data[bullets_key] or len(data[bullets_key]) < 3:
-        cat = data.get("category", "General")
         title = data.get("title", "this development")[:80]
         extra_bullets = [
-            f"This update highlights a pivotal moment for {cat} stakeholders.",
+            f"This update highlights a pivotal moment for {article_cat} stakeholders.",
             f"Observers are noting significant implications for future planning and policy."
         ]
         if not data[bullets_key]:
@@ -238,17 +238,12 @@ def normalize_article_data(data: dict, strip_large_fields: bool = False):
             data[field] = val
         
     # 3. Force rebuild 'content' for old JS compatibility
-    # Use normalized values for the combined body
+    # Use normalized values for the combined body - SIMPLIFIED: No images, why, or who
     bullets_text = "\n".join([f"• {b}" for b in data.get(bullets_key, [])])
-    data["content"] = f"### {data.get('title', 'Intelligence report')}\n\n**Summary:**\n{bullets_text}\n\n**Why It Matters:**\n{data.get(why_key, '')}\n\n**Who is Affected:**\n{data.get(who_key, '')}\n\n**Extra Context:**\n{data.get('extra_stuff', '')}\n\n**What Happens Next:**\n{data.get('what_happens_next', '')}\n\n---\n*Source: {data.get('official_url') or data.get('url') or 'Global Intel'}*"
+    data["content"] = f"### {data.get('title', 'Intelligence report')}\n\n**Summary:**\n{bullets_text}\n\n---\n*Source: {data.get('official_url') or data.get('url') or 'Global Intel'}*"
     
-    # Force absolute URLs for images
-    image_url = data.get("image_url")
-    article_cat = data.get("category", "General")
-    if data.get("student_category"): article_cat = "Education"
-    
-    if not image_url or str(image_url).lower() == 'none' or str(image_url) == "":
-        data["image_url"] = get_fallback_image(data.get("title", ""), article_cat)
+    # Force null for images as per user request (Simplified UI)
+    data["image_url"] = None
     
     # NEW: Strip HTML from title and source to prevent code leaks
     import re
@@ -276,6 +271,14 @@ def normalize_article_data(data: dict, strip_large_fields: bool = False):
         data["image_url"] = f"/static/{image_url.lstrip('/')}"
 
     # 4. Strip large fields if requested to save bandwidth (Egress Optimization)
+    # Also strip hidden fields from public display
+    data.pop("why", None)
+    data.pop("why_it_matters", None)
+    data.pop("affected", None)
+    data.pop("who_is_affected", None)
+    data.pop("extra_stuff", None)
+    data.pop("what_happens_next", None)
+
     if strip_large_fields:
         data.pop("content", None)
         data.pop("analysis", None)
@@ -1529,9 +1532,9 @@ async def get_all_articles(category: str = None, country: str = None, db: Sessio
     try:
         query = db.query(VerifiedNews)
         if category and category != 'All':
-            query = query.filter(VerifiedNews.category == category)
+            query = query.filter(VerifiedNews.category.ilike(category))
         if country:
-            query = query.filter(VerifiedNews.country == country)
+            query = query.filter(VerifiedNews.country.ilike(country))
             
         # LIFO: Impact score first (manual priority), then newest first
         articles = query.order_by(VerifiedNews.impact_score.desc(), VerifiedNews.created_at.desc()).all()
@@ -1564,7 +1567,7 @@ async def get_all_ads(db: Session = Depends(get_db)):
     """Fetch all campaign nodes (advertisements)"""
     try:
         ads = db.query(Advertisement).order_by(Advertisement.created_at.desc()).all()
-        return ads
+        return [ad.to_dict() for ad in ads]
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1606,7 +1609,7 @@ async def get_protocol_history(db: Session = Depends(get_db)):
     try:
         from src.database.models import ProtocolHistory
         history = db.query(ProtocolHistory).order_by(ProtocolHistory.timestamp.desc()).limit(100).all()
-        return history
+        return [h.to_dict() for h in history]
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1635,8 +1638,8 @@ async def get_all_newspapers(db: Session = Depends(get_db)):
     """Fetch all registered source nodes"""
     try:
         from src.database.models import Newspaper
-        papers = db.query(Newspaper).order_by(Newspaper.name.asc()).all()
-        return papers
+        papers = db.query(Newspaper).order_by(Newspaper.created_at.desc()).all()
+        return [p.to_dict() for p in papers]
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1933,7 +1936,7 @@ async def get_user_personalized_news(
     if not user:
         # Fallback for guest: Just latest news
         stories = db.query(VerifiedNews).order_by(VerifiedNews.id.desc()).limit(20).all()
-        return {"status": "success", "stories": [normalize_article_data(s) for s in stories]}
+        return {"status": "success", "stories": [normalize_article_data(s.to_dict()) for s in stories]}
     
     # Get user interests
     subs = db.query(Subscription).filter(Subscription.user_id == user.id).all()

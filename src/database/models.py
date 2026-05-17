@@ -48,19 +48,21 @@ class VerifiedNews(Base):
     sub_category = Column(String, nullable=True, index=True) # e.g. "Scholarships", "Exams"
     country = Column(String, nullable=True, index=True)
     credibility_score = Column(Float)
-    impact_score = Column(Integer) # 1-10
+    impact_score = Column(Integer, index=True) # 1-10
     why_it_matters = Column(Text)
     who_is_affected = Column(Text, nullable=True)
     short_term_impact = Column(Text, nullable=True)
     long_term_impact = Column(Text, nullable=True)
     sentiment = Column(String)
     lang = Column(String, default='english', index=True) # Source language
+    image_url_manual = Column(String, nullable=True) # Manually uploaded or custom URL
+    access_link = Column(String, nullable=True) # Button link for scholarships/jobs
     
     is_fake = Column(Boolean, default=False)
     flag_count = Column(Integer, default=0)
     
     published_at = Column(DateTime)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
     
     # New Perfection Fields
     translation_cache = Column(JSON, default=dict) # {lang: {title, why, impacted}}
@@ -72,6 +74,8 @@ class VerifiedNews(Base):
     @property
     def image_url(self) -> Optional[str]:
         """Backward compatibility for templates and logic expecting image_url attribute."""
+        if self.image_url_manual:
+            return self.image_url_manual
         if self.raw_news and self.raw_news.url_to_image:
             return self.raw_news.url_to_image
         return None
@@ -111,7 +115,9 @@ class VerifiedNews(Base):
             "sentiment": self.sentiment,
             "published_at": self.published_at.isoformat() if self.published_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
-            "source_name": self.raw_news.source_name if self.raw_news else "Unknown"
+            "source_name": self.raw_news.source_name if self.raw_news else "Unknown",
+            "image_url": self.image_url,
+            "access_link": self.access_link
         }
 
 class DailyDigest(Base):
@@ -274,6 +280,19 @@ class Advertisement(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "image_url": self.image_url,
+            "caption": self.caption,
+            "position": self.position,
+            "target_node": self.target_node,
+            "target_url": self.target_url,
+            "target_platform": self.target_platform,
+            "is_active": self.is_active,
+            "created_at": self.created_at.isoformat() if self.created_at else None
+        }
+
 class Newspaper(Base):
     __tablename__ = "newspapers"
     
@@ -285,6 +304,17 @@ class Newspaper(Base):
     country = Column(String, default="Global")
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "url": self.url,
+            "logo_text": self.logo_text,
+            "logo_color": self.logo_color,
+            "country": self.country,
+            "created_at": self.created_at.isoformat() if self.created_at else None
+        }
+
 class ProtocolHistory(Base):
     __tablename__ = "protocol_history"
     
@@ -292,9 +322,20 @@ class ProtocolHistory(Base):
     action = Column(String, nullable=False) # e.g. 'deploy', 'delete', 'register'
     target_type = Column(String, nullable=False) # e.g. 'article', 'source', 'ad'
     target_id = Column(String, nullable=True)
-    admin_user = Column(String, nullable=False)
+    admin_user = Column(String, default="Admin")
     details = Column(Text, nullable=True)
     timestamp = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "action": self.action,
+            "target_type": self.target_type,
+            "target_id": self.target_id,
+            "admin_user": self.admin_user,
+            "details": self.details,
+            "timestamp": self.timestamp.isoformat() if self.timestamp else None
+        }
 
 class SystemConfig(Base):
     __tablename__ = "system_config"
