@@ -20,7 +20,9 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from loguru import logger
+# pyrefly: ignore [missing-import]
 import sentry_sdk
+# pyrefly: ignore [missing-import]
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from src.config.settings import SENTRY_DSN
 
@@ -39,7 +41,11 @@ else:
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 from src.delivery.web_dashboard import router as dashboard_router
-from src.delivery.user_retention import router as retention_router
+from src.delivery.user_retention import (
+    router as retention_router,
+    router_legacy as retention_legacy_router,
+    router_api as retention_api_router
+)
 from src.delivery.admin_portal import router as admin_router
 
 from src.config.settings import DATA_DIR
@@ -231,6 +237,8 @@ app.add_middleware(
 
 # Include Routers (Now only serving API and necessary Admin logic)
 app.include_router(retention_router)
+app.include_router(retention_legacy_router)
+app.include_router(retention_api_router)
 app.include_router(dashboard_router)
 app.include_router(admin_router)
 

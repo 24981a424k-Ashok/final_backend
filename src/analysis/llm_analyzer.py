@@ -161,8 +161,8 @@ class LLMAnalyzer:
                     except: pass
                     
                     error_msg = str(e).lower()
-                    is_quota = any(word in error_msg for word in ["quota", "insufficient", "spend", "limit"])
-                    is_rate = "429" in error_msg or "rate_limit" in error_msg
+                    is_rate = any(word in error_msg for word in ["429", "rate limit", "rate_limit", "throttle", "too many requests"]) and "insufficient_quota" not in error_msg and "quota exceeded" not in error_msg
+                    is_quota = not is_rate and any(word in error_msg for word in ["quota", "insufficient", "spend", "invalid", "deactivated", "disabled", "revoked", "billing"])
                     
                     if is_quota or is_rate:
                         self._mark_key_limited(key, is_dead=is_quota)
@@ -443,8 +443,9 @@ IMPORTANT: Output ONLY valid JSON.
                     try: await client.close()
                     except: pass
                     error_msg = str(e).lower()
-                    is_quota = "quota" in error_msg or "insufficient" in error_msg
-                    if is_quota or "429" in error_msg:
+                    is_rate = any(word in error_msg for word in ["429", "rate limit", "rate_limit", "throttle", "too many requests"])
+                    is_quota = not is_rate and any(word in error_msg for word in ["quota", "insufficient", "spend", "invalid", "deactivated", "disabled", "revoked", "limit", "billing"])
+                    if is_quota or is_rate:
                         self._mark_key_limited(key, is_dead=is_quota)
                         continue
                     logger.error(f"Premium analysis failed: {e}")
@@ -541,8 +542,9 @@ IMPORTANT: Output ONLY valid JSON.
                 try: await client.close()
                 except: pass
                 error_msg = str(e).lower()
-                is_quota = "quota" in error_msg or "insufficient" in error_msg
-                if is_quota or "429" in error_msg:
+                is_rate = any(word in error_msg for word in ["429", "rate limit", "rate_limit", "throttle", "too many requests"]) and "insufficient_quota" not in error_msg and "quota exceeded" not in error_msg
+                is_quota = not is_rate and any(word in error_msg for word in ["quota", "insufficient", "spend", "invalid", "deactivated", "disabled", "revoked", "billing"])
+                if is_quota or is_rate:
                     self._mark_key_limited(key, is_dead=is_quota)
                     continue
                 logger.error(f"Completion failed: {e}")

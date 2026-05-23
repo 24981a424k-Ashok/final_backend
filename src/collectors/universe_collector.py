@@ -49,9 +49,9 @@ class UniverseCollector:
     def __init__(self):
         self.sources = UNIVERSE_SOURCES
         # Use simple pool from settings
-        self.api_keys = settings.OPENAI_API_KEYS
-        if not self.api_keys:
-            self.api_keys = [OPENAI_API_KEY]
+        openai_pool = settings.OPENAI_API_KEYS if settings.OPENAI_API_KEYS else ([OPENAI_API_KEY] if OPENAI_API_KEY else [])
+        groq_pool = settings.GROQ_API_KEYS if settings.GROQ_API_KEYS else []
+        self.api_keys = openai_pool + groq_pool
 
 
     async def fetch_country_news(self, country: str) -> Dict[str, Any]:
@@ -177,13 +177,20 @@ class UniverseCollector:
         prompt = f"Summarize the current situation in {country} based on these headlines in 2-3 engaging sentences for a 'Digital Newspaper' briefing:\n" + "\n".join(summary_points)
         
         # We'll use the first available key
-        for key in self.api_keys + [OPENAI_API_KEY]:
-            if not key: continue
+        all_keys = list(dict.fromkeys([k for k in self.api_keys if k]))
+        for key in all_keys[:5]:
             try:
                 from openai import AsyncOpenAI
-                client = AsyncOpenAI(api_key=key)
+                is_groq = key.startswith("gsk_")
+                if is_groq:
+                    client = AsyncOpenAI(api_key=key, base_url="https://api.groq.com/openai/v1")
+                    model = "llama-3.3-70b-versatile"
+                else:
+                    client = AsyncOpenAI(api_key=key)
+                    model = "gpt-4o-mini"
+                    
                 response = await client.chat.completions.create(
-                    model="gpt-4o-mini",
+                    model=model,
                     messages=[{"role": "user", "content": prompt}],
                     max_tokens=150,
                     timeout=10
@@ -332,17 +339,24 @@ class UniverseCollector:
         {json.dumps([{ 'title': a['title'], 'content': a['content'][:250], 'source': a['source_name'] } for a in articles])}
         """
         
-        all_keys = self.api_keys + [OPENAI_API_KEY]
-        all_keys = [k for k in all_keys if k]
+        # Remove duplicate keys and filter empty keys
+        all_keys = list(dict.fromkeys([k for k in self.api_keys if k]))
         
-        # INCREASED AGGRESSION: Limit attempt count to 3 for search stability
+        # INCREASED AGGRESSION: Limit attempt count to 5 for search stability
         for i, key in enumerate(all_keys[:5]):
             try:
                 from openai import AsyncOpenAI
-                client = AsyncOpenAI(api_key=key)
+                is_groq = key.startswith("gsk_")
+                if is_groq:
+                    client = AsyncOpenAI(api_key=key, base_url="https://api.groq.com/openai/v1")
+                    model = "llama-3.3-70b-versatile"
+                else:
+                    client = AsyncOpenAI(api_key=key)
+                    model = "gpt-4o-mini"
+                    
                 # REDUCED TIMEOUT: 15s for search speed
                 response = await client.chat.completions.create(
-                    model="gpt-4o-mini",
+                    model=model,
                     messages=[
                         {"role": "system", "content": "You are a global intelligence analyst. Output ONLY JSON."},
                         {"role": "user", "content": prompt}

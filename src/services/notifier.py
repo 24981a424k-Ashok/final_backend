@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 from twilio.rest import Client
 from sqlalchemy.orm import Session
 from src.database.models import SessionLocal, TopicTracking, VerifiedNews, User, TrackNotification
-from src.config.settings import getattr
 
 logger = logging.getLogger(__name__)
 

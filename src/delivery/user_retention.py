@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Retention"], prefix="/api/v2/retention")
 router_legacy = APIRouter(tags=["Retention Legacy"], prefix="/api/retention")
+router_api = APIRouter(tags=["User API"])
 
 def get_db():
     db = SessionLocal()
@@ -41,6 +42,7 @@ async def get_user_status(firebase_uid: str, db: Session = Depends(get_db)):
     }
 
 @router.post("/ping_streak")
+@router_legacy.post("/ping_streak")
 async def ping_streak(payload: dict = Body(...), db: Session = Depends(get_db)):
     firebase_uid = payload.get("firebase_uid")
     if not firebase_uid:
@@ -80,7 +82,8 @@ async def ping_streak(payload: dict = Body(...), db: Session = Depends(get_db)):
 
 class SaveRequest(BaseModel):
     firebase_uid: str
-    news_id: int
+    news_id: Optional[int] = None
+    article_id: Optional[str] = None
     folder_id: Optional[int] = None
 
 class FolderRequest(BaseModel):
@@ -89,9 +92,14 @@ class FolderRequest(BaseModel):
 
 class HistoryRequest(BaseModel):
     firebase_uid: str
-    news_id: int
+    news_id: Optional[int] = None
+    article_id: Optional[str] = None
+
+class DeleteSaveRequest(BaseModel):
+    article_id: Optional[str] = None
 
 @router.post("/save")
+@router_legacy.post("/save")
 async def save_article(payload: SaveRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.firebase_uid == payload.firebase_uid).first()
     if not user:
@@ -101,10 +109,20 @@ async def save_article(payload: SaveRequest, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(user)
     
+    news_id = payload.news_id
+    if news_id is None and payload.article_id:
+        try:
+            news_id = int(payload.article_id)
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"Invalid article_id: {e}")
+            
+    if news_id is None:
+        raise HTTPException(status_code=422, detail="Either news_id or article_id is required")
+    
     # Check if already saved
     existing = db.query(SavedArticle).filter(
         SavedArticle.user_id == user.id,
-        SavedArticle.news_id == payload.news_id
+        SavedArticle.news_id == news_id
     ).first()
     
     if existing:
@@ -112,7 +130,7 @@ async def save_article(payload: SaveRequest, db: Session = Depends(get_db)):
     
     save_entry = SavedArticle(
         user_id=user.id,
-        news_id=payload.news_id,
+        news_id=news_id,
         folder_id=payload.folder_id
     )
     db.add(save_entry)
@@ -120,6 +138,7 @@ async def save_article(payload: SaveRequest, db: Session = Depends(get_db)):
     return {"status": "success", "message": "Article saved"}
 
 @router.post("/history")
+@router_legacy.post("/history")
 async def track_history(payload: HistoryRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.firebase_uid == payload.firebase_uid).first()
     if not user:
@@ -130,17 +149,27 @@ async def track_history(payload: HistoryRequest, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(user)
     
+    news_id = payload.news_id
+    if news_id is None and payload.article_id:
+        try:
+            news_id = int(payload.article_id)
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"Invalid article_id: {e}")
+            
+    if news_id is None:
+        raise HTTPException(status_code=422, detail="Either news_id or article_id is required")
+    
     # Track the reading event - but only once per article per day for streak
     existing_history = db.query(ReadHistory).filter(
         ReadHistory.user_id == user.id,
-        ReadHistory.news_id == payload.news_id,
+        ReadHistory.news_id == news_id,
         ReadHistory.read_at >= datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     ).first()
 
     if not existing_history:
         history_entry = ReadHistory(
             user_id=user.id,
-            news_id=payload.news_id
+            news_id=news_id
         )
         db.add(history_entry)
         
@@ -172,6 +201,7 @@ async def get_saved_articles(firebase_uid: str, db: Session = Depends(get_db)):
     return await _fetch_saves(firebase_uid, db)
 
 @router.get("/saved-articles")
+@router_legacy.get("/saved-articles")
 async def get_saved_articles_alias(uid: str, db: Session = Depends(get_db)):
     """Compatibility alias for frontend calling with ?uid=... instead of path param."""
     return await _fetch_saves(uid, db)
@@ -202,7 +232,7 @@ async def _fetch_saves(firebase_uid: str, db: Session):
 async def get_history(firebase_uid: str, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.firebase_uid == firebase_uid).first()
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        return []
     
     history = db.query(ReadHistory).filter(ReadHistory.user_id == user.id).order_by(ReadHistory.read_at.desc()).all()
     result = []
@@ -219,6 +249,11 @@ async def get_history(firebase_uid: str, db: Session = Depends(get_db)):
         })
     return result
 
+@router_api.get("/api/user/read-history")
+async def get_history_api(uid: str, db: Session = Depends(get_db)):
+    return await get_history(firebase_uid=uid, db=db)
+
+
 @router.delete("/history/{firebase_uid}")
 async def clear_history(firebase_uid: str, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.firebase_uid == firebase_uid).first()
@@ -230,12 +265,29 @@ async def clear_history(firebase_uid: str, db: Session = Depends(get_db)):
     return {"status": "success", "message": "History cleared"}
 
 @router.delete("/saved/{firebase_uid}")
-async def clear_saved_articles(firebase_uid: str, db: Session = Depends(get_db)):
+@router_legacy.delete("/saved/{firebase_uid}")
+async def clear_saved_articles(
+    firebase_uid: str,
+    payload: Optional[DeleteSaveRequest] = Body(default=None),
+    db: Session = Depends(get_db)
+):
     user = db.query(User).filter(User.firebase_uid == firebase_uid).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    db.query(SavedArticle).filter(SavedArticle.user_id == user.id).delete()
+    if payload and payload.article_id:
+        try:
+            news_id_int = int(payload.article_id)
+        except Exception:
+            raise HTTPException(status_code=422, detail="Invalid article_id format")
+        
+        db.query(SavedArticle).filter(
+            SavedArticle.user_id == user.id,
+            SavedArticle.news_id == news_id_int
+        ).delete()
+    else:
+        db.query(SavedArticle).filter(SavedArticle.user_id == user.id).delete()
+        
     db.commit()
     return {"status": "success", "message": "Saved articles cleared"}
 
@@ -272,6 +324,7 @@ async def update_phone(payload: PhoneUpdateRequest, db: Session = Depends(get_db
     return {"status": "success", "message": "Phone number updated"}
 
 @router.post("/track_topic")
+@router_legacy.post("/track_topic")
 async def track_topic(payload: TrackTopicRequest, db: Session = Depends(get_db)):
     """Permanent topic tracking for 30 days via email and SMS."""
     from src.delivery.notifications import NotificationManager

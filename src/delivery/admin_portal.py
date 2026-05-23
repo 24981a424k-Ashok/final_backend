@@ -190,8 +190,11 @@ class NewspaperUpdate(BaseModel):
 
 # --- Article CRUD ---
 @router.get("/articles")
-async def get_admin_articles(db: Session = Depends(get_db), auth: bool = Depends(verify_admin)):
-    articles = db.query(VerifiedNews).order_by(VerifiedNews.created_at.desc()).limit(100).all()
+async def get_admin_articles(category: Optional[str] = None, db: Session = Depends(get_db), auth: bool = Depends(verify_admin)):
+    query = db.query(VerifiedNews)
+    if category and category != "All":
+        query = query.filter(VerifiedNews.category == category)
+    articles = query.order_by(VerifiedNews.created_at.desc()).limit(100).all()
     return articles
 
 @router.post("/articles")
@@ -480,3 +483,51 @@ async def update_admin_config(payload: Dict[str, str], db: Session = Depends(get
     db.commit()
     log_protocol_action(db, 'config_update', 'system', None, f"Updated System Parameters: {list(payload.keys())}")
     return {"status": "updated"}
+
+# --- Pipeline & Key Pool Control ---
+@router.post("/trigger-ingest")
+async def trigger_news_ingestion(db: Session = Depends(get_db), auth: bool = Depends(verify_admin)):
+    try:
+        from src.scheduler.task_scheduler import run_news_cycle
+        import threading
+        # Launch cycle asynchronously in the background
+        threading.Thread(target=lambda: asyncio.run(run_news_cycle()), daemon=True).start()
+        log_protocol_action(db, 'ingest_trigger', 'news_pipeline', None, "Manual News Ingestion Pipeline Started")
+        return {"status": "success", "message": "News ingestion cycle running in background."}
+    except Exception as e:
+        logger.error(f"Ingestion trigger failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/clear-cache")
+async def clear_translation_cache(db: Session = Depends(get_db), auth: bool = Depends(verify_admin)):
+    try:
+        num_updated = db.query(VerifiedNews).update({VerifiedNews.translation_cache: {}})
+        db.commit()
+        log_protocol_action(db, 'clear_cache', 'translation_cache', None, f"Cleared translation cache for {num_updated} articles")
+        return {"status": "success", "articles_cleared": num_updated}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Cache clear failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/keypool-status")
+async def get_keypool_status(auth: bool = Depends(verify_admin)):
+    from src.config import settings
+    
+    openai_keys = []
+    for i, k in enumerate(settings.OPENAI_API_KEYS):
+        masked = f"{k[:8]}...{k[-4:]}" if len(k) > 12 else k
+        openai_keys.append({"index": i + 1, "key": masked, "status": "active"})
+        
+    groq_keys = []
+    for i, k in enumerate(settings.GROQ_API_KEYS):
+        masked = f"{k[:6]}...{k[-4:]}" if len(k) > 10 else k
+        groq_keys.append({"index": i + 1, "key": masked, "status": "active"})
+        
+    return {
+        "status": "success",
+        "total": len(openai_keys) + len(groq_keys),
+        "openai": {"count": len(openai_keys), "keys": openai_keys},
+        "groq": {"count": len(groq_keys), "keys": groq_keys}
+    }
+

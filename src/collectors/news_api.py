@@ -49,60 +49,120 @@ class NewsCollector:
                 return 0
 
             all_articles = []
+            key_failed = False
             
-            try:
-                # 1. General Top Headlines
-                try:
-                    res = client.get_top_headlines(language='en', page_size=70)
-                    if res.get('status') == 'ok':
-                        all_articles.extend(res.get('articles', []))
-                    elif res.get('code') == 'apiKeyInvalid':
-                        self._mark_key_limited(active_key, dead=True)
-                        continue # Try next key
-                except Exception as e:
-                    if "rateLimited" in str(e) or "429" in str(e) or "403" in str(e):
-                        self._mark_key_limited(active_key)
-                        return 0 # Stop this run
-                    if "apiKeyInvalid" in str(e):
-                        self._mark_key_limited(active_key, dead=True)
-                        continue # Try next key
-                    logger.error(f"NewsAPI General failed: {e}")
+            def check_exception(e):
+                err_str = str(e).lower()
+                is_rate = "ratelimited" in err_str or "429" in err_str or "403" in err_str
+                is_invalid = "apikeyinvalid" in err_str or "401" in err_str or "invalid" in err_str
+                return is_rate, is_invalid
 
-                # 2. Business Headlines
-                try:
-                    res = client.get_top_headlines(language='en', category='business', country='in', page_size=30)
-                    if res['status'] == 'ok':
-                        all_articles.extend(res.get('articles', []))
-                except Exception as e:
+            # 1. General Top Headlines
+            try:
+                res = client.get_top_headlines(language='en', page_size=70)
+                if res.get('status') == 'ok':
+                    all_articles.extend(res.get('articles', []))
+                elif res.get('status') == 'error':
+                    code = res.get('code', '')
+                    if code == 'apiKeyInvalid' or 'invalid' in code.lower():
+                        self._mark_key_limited(active_key, dead=True)
+                        continue
+                    elif code == 'rateLimited':
+                        self._mark_key_limited(active_key)
+                        continue
+            except Exception as e:
+                is_rate, is_invalid = check_exception(e)
+                if is_rate or is_invalid:
+                    self._mark_key_limited(active_key, dead=is_invalid)
+                    continue
+                logger.error(f"NewsAPI General failed: {e}")
+
+            # 2. Business Headlines
+            try:
+                res = client.get_top_headlines(language='en', category='business', country='in', page_size=30)
+                if res.get('status') == 'ok':
+                    all_articles.extend(res.get('articles', []))
+                elif res.get('status') == 'error':
+                    code = res.get('code', '')
+                    if code == 'apiKeyInvalid' or 'invalid' in code.lower():
+                        self._mark_key_limited(active_key, dead=True)
+                        key_failed = True
+                    elif code == 'rateLimited':
+                        self._mark_key_limited(active_key)
+                        key_failed = True
+            except Exception as e:
+                is_rate, is_invalid = check_exception(e)
+                if is_rate or is_invalid:
+                    self._mark_key_limited(active_key, dead=is_invalid)
+                    key_failed = True
+                else:
                     logger.warning(f"NewsAPI Business failed: {e}")
 
-                # 3. Sports Headlines
-                try:
-                    res = client.get_top_headlines(language='en', category='sports', page_size=30)
-                    if res['status'] == 'ok':
-                        all_articles.extend(res.get('articles', []))
-                except Exception as e:
+            if key_failed:
+                continue
+
+            # 3. Sports Headlines
+            try:
+                res = client.get_top_headlines(language='en', category='sports', page_size=30)
+                if res.get('status') == 'ok':
+                    all_articles.extend(res.get('articles', []))
+                elif res.get('status') == 'error':
+                    code = res.get('code', '')
+                    if code == 'apiKeyInvalid' or 'invalid' in code.lower():
+                        self._mark_key_limited(active_key, dead=True)
+                        key_failed = True
+                    elif code == 'rateLimited':
+                        self._mark_key_limited(active_key)
+                        key_failed = True
+            except Exception as e:
+                is_rate, is_invalid = check_exception(e)
+                if is_rate or is_invalid:
+                    self._mark_key_limited(active_key, dead=is_invalid)
+                    key_failed = True
+                else:
                     logger.warning(f"NewsAPI Sports failed: {e}")
 
-                # 4. Target Countries
-                for country_code in ['jp', 'us']:
-                    try:
-                        res = client.get_top_headlines(
-                            language='en' if country_code != 'jp' else None,
-                            country=country_code,
-                            page_size=20
-                        )
-                        if res['status'] == 'ok':
-                            articles = res.get('articles', [])
-                            for a in articles:
-                                a['target_country'] = country_code
-                            all_articles.extend(articles)
-                    except Exception as ce:
+            if key_failed:
+                continue
+
+            # 4. Target Countries
+            for country_code in ['jp', 'us']:
+                try:
+                    res = client.get_top_headlines(
+                        language='en' if country_code != 'jp' else None,
+                        country=country_code,
+                        page_size=20
+                    )
+                    if res.get('status') == 'ok':
+                        articles = res.get('articles', [])
+                        for a in articles:
+                            a['target_country'] = country_code
+                        all_articles.extend(articles)
+                    elif res.get('status') == 'error':
+                        code = res.get('code', '')
+                        if code == 'apiKeyInvalid' or 'invalid' in code.lower():
+                            self._mark_key_limited(active_key, dead=True)
+                            key_failed = True
+                            break
+                        elif code == 'rateLimited':
+                            self._mark_key_limited(active_key)
+                            key_failed = True
+                            break
+                except Exception as ce:
+                    is_rate, is_invalid = check_exception(ce)
+                    if is_rate or is_invalid:
+                        self._mark_key_limited(active_key, dead=is_invalid)
+                        key_failed = True
+                        break
+                    else:
                         logger.warning(f"NewsAPI {country_code} failed: {ce}")
 
+            if key_failed:
+                continue
+
+            try:
                 saved_count = self._save_articles(all_articles)
                 return saved_count
-            
             except Exception as e:
                 logger.error(f"Error in NewsAPI collection cycle: {e}")
                 return 0

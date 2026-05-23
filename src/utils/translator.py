@@ -99,8 +99,8 @@ class NewsTranslator:
                 return key, provider, "active"
             except Exception as e:
                 error_msg = str(e).lower()
-                is_quota = any(word in error_msg for word in ["quota", "insufficient", "spend", "limit"])
-                is_rate = "429" in error_msg or "rate_limit" in error_msg
+                is_rate = any(word in error_msg for word in ["429", "rate limit", "rate_limit", "throttle", "too many requests"]) and "insufficient_quota" not in error_msg and "quota exceeded" not in error_msg
+                is_quota = not is_rate and any(word in error_msg for word in ["quota", "insufficient", "spend", "invalid", "deactivated", "disabled", "revoked", "billing"])
                 
                 status = "dead" if is_quota else ("limited" if is_rate else "error")
                 self._mark_key_limited(key, is_dead=(status == "dead"))
@@ -178,7 +178,7 @@ class NewsTranslator:
         return text
 
     def _get_best_key(self):
-        """Selects the next available key from the rotation pool, prioritizing premium keys."""
+        """Selects the next available key from the rotation pool, prioritizing premium keys but using random offsets to avoid parallel collisions."""
         now = time.time()
         
         premium_openai = [settings.OPENAI_KEY_1, settings.OPENAI_KEY_2, settings.OPENAI_KEY_3]
@@ -187,14 +187,22 @@ class NewsTranslator:
         all_others = [k for k in self.all_keys if k not in premium_openai and k not in premium_groq]
         priority_queue = [k for k in premium_openai if k] + [k for k in premium_groq if k] + all_others
         
-        for key in priority_queue:
+        num_keys = len(priority_queue)
+        if num_keys == 0:
+            return None, None
+            
+        # Start scanning from a random offset to prevent concurrent requests from picking the same key
+        start_idx = random.randint(0, num_keys - 1)
+        for i in range(num_keys):
+            idx = (start_idx + i) % num_keys
+            key = priority_queue[idx]
             status = self._key_status.get(key, {"status": "active", "retry_after": 0})
             if status["status"] == "dead": continue
             if status["status"] == "cooled_down":
                 if now < status["retry_after"]: continue
                 else: self._key_status[key] = {"status": "active", "retry_after": 0}
             
-            return key, priority_queue.index(key)
+            return key, idx
         return None, None
 
     def _clean_json(self, text_content):
@@ -291,8 +299,9 @@ class NewsTranslator:
                     return response.choices[0].message.content.strip()
                 except Exception as e:
                     error_msg = str(e).lower()
-                    is_quota = any(word in error_msg for word in ["quota", "insufficient", "spend", "limit"])
-                    if is_quota or "429" in error_msg:
+                    is_rate = any(word in error_msg for word in ["429", "rate limit", "rate_limit", "throttle", "too many requests"]) and "insufficient_quota" not in error_msg and "quota exceeded" not in error_msg
+                    is_quota = not is_rate and any(word in error_msg for word in ["quota", "insufficient", "spend", "invalid", "deactivated", "disabled", "revoked", "billing"])
+                    if is_quota or is_rate:
                         self._mark_key_limited(key, is_dead=is_quota)
                     continue
 
@@ -427,12 +436,21 @@ class NewsTranslator:
                             return raw_result.get("translated")
                         else:
                             logger.warning(f"Translation JSON parse failed for {target_lang}. Response was not in expected format.")
+                            # Treat JSON parse error as a minor error, trigger rotate
+                            self._mark_key_limited(key, is_dead=False)
 
                     except Exception as e:
-                        key, k_idx = self._get_best_key()
-                        if not key:
-                            break
-                        client, provider = self._get_client_by_key(key)
+                        error_msg = str(e).lower()
+                        is_rate = any(word in error_msg for word in ["429", "rate limit", "rate_limit", "throttle", "too many requests"]) and "insufficient_quota" not in error_msg and "quota exceeded" not in error_msg
+                        is_quota = not is_rate and any(word in error_msg for word in ["quota", "insufficient", "spend", "invalid", "deactivated", "disabled", "revoked", "billing"])
+                        self._mark_key_limited(key, is_dead=is_quota)
+                        logger.warning(f"Batch translation failed on key {key[:8]}... (attempt {attempt+1}/{max_attempts}): {e}. Rotating...")
+
+                    # Rotate key for the next attempt
+                    key, k_idx = self._get_best_key()
+                    if not key:
+                        break
+                    client, provider = self._get_client_by_key(key)
                 
                 # BATCH FAILBACK: Parallel single-item translation fallback
                 async def translate_item_safe(item):
