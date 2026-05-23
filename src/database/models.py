@@ -115,7 +115,9 @@ class VerifiedNews(Base):
             "sentiment": self.sentiment,
             "published_at": self.published_at.isoformat() if self.published_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
-            "source_name": self.raw_news.source_name if self.raw_news else "Unknown"
+            "source_name": self.raw_news.source_name if self.raw_news else "Unknown",
+            "url": self.url,
+            "image_url": self.image_url
         }
 
 class DailyDigest(Base):

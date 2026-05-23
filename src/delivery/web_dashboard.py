@@ -342,9 +342,9 @@ def is_student_article_logic(article):
     # 1. Category check (Direct match or sub-string)
     is_student_cat = any(sc.lower() in cat_val for sc in STUDENT_NEWS_CATEGORIES)
     
-    # 2. Exclusions check: apply exclusions unless overridden by strong student context
+    # 2. Exclusions check: apply exclusions unless overridden by strong student context in title
     has_exclusion = any(ex in combined for ex in EXCLUSION_KEYWORDS)
-    strong_student_override = any(kw in combined for kw in ["scholarship", "internship", "fellowship", "admit card", "mock test"])
+    strong_student_override = any(kw in title for kw in ["scholarship", "internship", "fellowship", "admit card", "mock test"])
     
     if has_exclusion and not strong_student_override:
         return False
@@ -2403,9 +2403,13 @@ async def _update_student_cache_if_needed(db: Session, force: bool = False, coun
     for art in raw_articles:
         if not is_student_article_logic(art): continue
         
-        art_url = f"/article/{art.id}"
-        if art_url in seen_urls: continue
-        seen_urls.add(art_url)
+        art_url = art.url
+        if not art_url or not art_url.startswith("http"):
+            art_url = f"https://finalbackend-production-9218.up.railway.app/api/article/{art.id}"
+            
+        dup_key = f"/article/{art.id}"
+        if dup_key in seen_urls: continue
+        seen_urls.add(dup_key)
         
         # Map into exact categories requested by the user
         combined_text = f"{art.title} {art.content} {art.why_it_matters} {art.category}".lower()
@@ -2467,7 +2471,7 @@ async def _update_student_cache_if_needed(db: Session, force: bool = False, coun
 @router.get("/api/search-news")
 @router.get("/api/v2/get-personal-news")
 @router.get("/api/get-personal-news")
-async def api_get_personal_news(interests: str = None, q: str = None, lang: str = 'english', db: Session = Depends(get_db)):
+async def api_get_personal_news(interests: str = None, q: str = None, query: str = None, lang: str = 'english', db: Session = Depends(get_db)):
     """Fetch hyper-personalized news based on search query and selected interests."""
     try:
         from sqlalchemy import or_
@@ -2475,7 +2479,8 @@ async def api_get_personal_news(interests: str = None, q: str = None, lang: str 
         lookback = now_utc - timedelta(days=90) # Extended lookback to capture more student/personal data
         
         search_terms = []
-        if q: search_terms.append(q.lower().strip())
+        search_q = q or query
+        if search_q: search_terms.append(search_q.lower().strip())
         if interests: 
             # Handle both comma separated and individual terms
             search_terms.extend([i.strip().lower() for i in interests.split(',') if i.strip()])
