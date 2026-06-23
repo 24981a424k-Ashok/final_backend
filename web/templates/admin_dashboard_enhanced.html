@@ -1,1 +1,703 @@
-<!DOCTYPE html><html><body><h1>Admin Dashboard (Pure API Mode)</h1></body></html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UNIARC Portal - Admin Console</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0b0f19;
+            --card-bg: rgba(17, 24, 39, 0.7);
+            --border-color: rgba(37, 99, 235, 0.2);
+            --border-hover: rgba(37, 99, 235, 0.5);
+            --accent-color: #2563eb;
+            --accent-glow: rgba(37, 99, 235, 0.35);
+            --text-color: #f3f4f6;
+            --text-muted: #9ca3af;
+            --success: #10b981;
+            --error: #ef4444;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-color);
+            background-image: 
+                radial-gradient(at 0% 0%, rgba(37, 99, 235, 0.1) 0px, transparent 50%),
+                radial-gradient(at 100% 100%, rgba(16, 185, 129, 0.05) 0px, transparent 50%);
+            color: var(--text-color);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow-x: hidden;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 1200px;
+            padding: 20px;
+        }
+
+        /* Glassmorphism Card base */
+        .card {
+            background: var(--card-bg);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 30px;
+            box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.7);
+            transition: border-color 0.3s ease;
+        }
+
+        .card:hover {
+            border-color: var(--border-hover);
+        }
+
+        /* Login Card Styles */
+        .login-card {
+            max-width: 450px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 25px;
+        }
+
+        .header h1 {
+            font-size: 28px;
+            font-weight: 800;
+            letter-spacing: -0.05em;
+            background: linear-gradient(to right, #60a5fa, #3b82f6);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 8px;
+        }
+
+        .header p {
+            color: var(--text-muted);
+            font-size: 14px;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+        }
+
+        .form-control {
+            width: 100%;
+            padding: 12px 16px;
+            background: rgba(15, 23, 42, 0.6);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            color: var(--text-color);
+            font-size: 15px;
+            outline: none;
+            transition: all 0.3s ease;
+        }
+
+        .form-control:focus {
+            border-color: #3b82f6;
+            box-shadow: 0 0 10px var(--accent-glow);
+        }
+
+        .btn {
+            display: inline-block;
+            width: 100%;
+            padding: 12px 20px;
+            background: var(--accent-color);
+            border: none;
+            border-radius: 8px;
+            color: white;
+            font-weight: 600;
+            font-size: 15px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            text-align: center;
+            text-decoration: none;
+        }
+
+        .btn:hover {
+            opacity: 0.9;
+            box-shadow: 0 0 15px var(--accent-glow);
+        }
+
+        .btn-secondary {
+            background: rgba(31, 41, 55, 0.8);
+            border: 1px solid var(--border-color);
+        }
+
+        .btn-secondary:hover {
+            background: rgba(55, 65, 81, 0.8);
+        }
+
+        /* Dashboard Styles */
+        .dashboard-layout {
+            display: none;
+            flex-direction: column;
+            gap: 24px;
+        }
+
+        .nav-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 20px;
+        }
+
+        .nav-header h2 {
+            font-size: 24px;
+            font-weight: 800;
+            color: white;
+        }
+
+        .nav-header .logout-btn {
+            max-width: 100px;
+            padding: 8px 16px;
+            font-size: 13px;
+        }
+
+        /* Dashboard Grid layouts */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 16px;
+        }
+
+        .stat-card {
+            background: rgba(17, 24, 39, 0.4);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .stat-card h4 {
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+        }
+
+        .stat-card .number {
+            font-size: 32px;
+            font-weight: 800;
+            color: #3b82f6;
+        }
+
+        .main-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 24px;
+        }
+
+        @media (max-width: 768px) {
+            .main-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .section-title {
+            font-size: 18px;
+            font-weight: 700;
+            margin-bottom: 16px;
+            color: #f3f4f6;
+            border-left: 3px solid #3b82f6;
+            padding-left: 8px;
+        }
+
+        /* Config Toggles */
+        .toggle-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 14px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .toggle-item:last-child {
+            border-bottom: none;
+        }
+
+        .toggle-label h5 {
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text-color);
+        }
+
+        .toggle-label p {
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+
+        /* Toggle Switch styling */
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 48px;
+            height: 24px;
+        }
+
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(31, 41, 55, 0.8);
+            border: 1px solid var(--border-color);
+            transition: .3s;
+            border-radius: 24px;
+        }
+
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 16px;
+            width: 16px;
+            left: 3px;
+            bottom: 3px;
+            background-color: var(--text-muted);
+            transition: .3s;
+            border-radius: 50%;
+        }
+
+        input:checked + .slider {
+            background-color: var(--accent-color);
+            border-color: var(--accent-color);
+        }
+
+        input:checked + .slider:before {
+            transform: translateX(24px);
+            background-color: white;
+        }
+
+        /* Action Buttons Box */
+        .actions-box {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .message-alert {
+            margin-top: 15px;
+            padding: 12px;
+            border-radius: 8px;
+            font-size: 13px;
+            display: none;
+        }
+
+        .message-success {
+            background: rgba(16, 185, 129, 0.1);
+            border: 1px solid var(--success);
+            color: var(--success);
+        }
+
+        .message-error {
+            background: rgba(239, 44, 44, 0.1);
+            border: 1px solid var(--error);
+            color: var(--error);
+        }
+
+        /* Keypool styling */
+        .keypool-list {
+            margin-top: 12px;
+            font-size: 13px;
+        }
+
+        .keypool-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 6px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+            font-family: monospace;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        
+        <!-- 1. LOGIN INTERFACE -->
+        <div id="login-container" class="card login-card">
+            <div class="header">
+                <h1>UNIARC CONSOLE</h1>
+                <p>Enter credentials to access neural sync parameters</p>
+            </div>
+            
+            <div class="form-group">
+                <label for="admin-email">Admin Email</label>
+                <input type="email" id="admin-email" class="form-control" placeholder="admin@uniintel.com">
+            </div>
+            
+            <div class="form-group">
+                <label for="admin-password">Admin Password</label>
+                <input type="password" id="admin-password" class="form-control" placeholder="••••••••">
+            </div>
+            
+            <button onclick="performLogin()" class="btn">Authenticate</button>
+            <div id="login-alert" class="message-alert message-error"></div>
+        </div>
+
+        <!-- 2. DASHBOARD INTERFACE -->
+        <div id="dashboard-container" class="card dashboard-layout">
+            <div class="nav-header">
+                <h2>UNIARC Admin Dashboard</h2>
+                <button onclick="performLogout()" class="btn btn-secondary logout-btn">Log Out</button>
+            </div>
+
+            <!-- Stats Block -->
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <h4>Inscribed Users</h4>
+                    <div id="stat-users" class="number">0</div>
+                </div>
+                <div class="stat-card">
+                    <h4>Verified Signals</h4>
+                    <div id="stat-articles" class="number">0</div>
+                </div>
+                <div class="stat-card">
+                    <h4>Raw Ingestions</h4>
+                    <div id="stat-raw" class="number">0</div>
+                </div>
+                <div class="stat-card">
+                    <h4>Active Nodes</h4>
+                    <div id="stat-nodes" class="number">0</div>
+                </div>
+            </div>
+
+            <div class="main-grid">
+                
+                <!-- System Config Switches -->
+                <div class="card">
+                    <h3 class="section-title">System Configurations</h3>
+                    
+                    <div class="toggle-item">
+                        <div class="toggle-label">
+                            <h5>Maintenance Mode</h5>
+                            <p>Locks the API endpoints and displays a maintenance screen in the app.</p>
+                        </div>
+                        <label class="switch">
+                            <input type="checkbox" id="cfg-maintenance_mode" onchange="toggleConfig('maintenance_mode')">
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+
+                    <div class="toggle-item">
+                        <div class="toggle-label">
+                            <h5>Show Scholarships</h5>
+                            <p>Enables/Disables the Scholarships & Internships module feed.</p>
+                        </div>
+                        <label class="switch">
+                            <input type="checkbox" id="cfg-show_scholarships" onchange="toggleConfig('show_scholarships')">
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+
+                    <div class="toggle-item">
+                        <div class="toggle-label">
+                            <h5>Show Exams & Results</h5>
+                            <p>Enables/Disables the Exams & admissions tracking module feed.</p>
+                        </div>
+                        <label class="switch">
+                            <input type="checkbox" id="cfg-show_exams" onchange="toggleConfig('show_exams')">
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+
+                    <div class="toggle-item">
+                        <div class="toggle-label">
+                            <h5>Show Admissions</h5>
+                            <p>Enables/Disables the Admissions & Courses module feed.</p>
+                        </div>
+                        <label class="switch">
+                            <input type="checkbox" id="cfg-show_admissions" onchange="toggleConfig('show_admissions')">
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+
+                    <div class="toggle-item">
+                        <div class="toggle-label">
+                            <h5>Show Career & Jobs</h5>
+                            <p>Enables/Disables the Career & Jobs tracking module feed.</p>
+                        </div>
+                        <label class="switch">
+                            <input type="checkbox" id="cfg-show_career" onchange="toggleConfig('show_career')">
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Manual Actions & Status -->
+                <div class="card">
+                    <h3 class="section-title">Execution Controls</h3>
+                    <div class="actions-box">
+                        <button onclick="triggerIngest()" class="btn btn-secondary">⚡ Trigger News Ingestion Cycle</button>
+                        <button onclick="clearCache()" class="btn btn-secondary">🧼 Clear Translation Cache</button>
+                        <button onclick="syncNodes()" class="btn btn-secondary">📡 Sync Neural Feed Nodes</button>
+                    </div>
+                    <div id="action-alert" class="message-alert"></div>
+
+                    <div style="margin-top: 24px;">
+                        <h3 class="section-title">API Keys Rotation Pools</h3>
+                        <div class="keypool-list" id="keypool-list">
+                            Loading Keypools Status...
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        // Core state
+        const API_PREFIX = "/api/admin";
+        let adminToken = localStorage.getItem("admin_token");
+
+        // UI toggling
+        window.onload = function() {
+            if (adminToken) {
+                showDashboard();
+            } else {
+                showLogin();
+            }
+        };
+
+        function showLogin() {
+            document.getElementById("login-container").style.display = "block";
+            document.getElementById("dashboard-container").style.display = "none";
+        }
+
+        function showDashboard() {
+            document.getElementById("login-container").style.display = "none";
+            document.getElementById("dashboard-container").style.display = "flex";
+            loadStats();
+            loadConfigs();
+            loadKeypool();
+        }
+
+        // Login Action
+        async function performLogin() {
+            const email = document.getElementById("admin-email").value;
+            const password = document.getElementById("admin-password").value;
+            const alertBox = document.getElementById("login-alert");
+
+            alertBox.style.display = "none";
+
+            try {
+                const response = await fetch(`${API_PREFIX}/login`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ email, password })
+                });
+
+                const data = await response.json();
+                if (response.ok && data.status === "success") {
+                    adminToken = data.token;
+                    localStorage.setItem("admin_token", adminToken);
+                    showDashboard();
+                } else {
+                    alertBox.innerText = data.detail || "Authentication Failed";
+                    alertBox.style.display = "block";
+                }
+            } catch (err) {
+                alertBox.innerText = "Network Error: Could not reach endpoint.";
+                alertBox.style.display = "block";
+            }
+        }
+
+        function performLogout() {
+            localStorage.removeItem("admin_token");
+            adminToken = null;
+            showLogin();
+        }
+
+        // API Calls Helper
+        async function authenticatedFetch(endpoint, options = {}) {
+            const headers = {
+                "Authorization": `Bearer ${adminToken}`,
+                "Content-Type": "application/json",
+                ...(options.headers || {})
+            };
+            const response = await fetch(`${API_PREFIX}${endpoint}`, { ...options, headers });
+            if (response.status === 403 || response.status === 401) {
+                performLogout();
+                throw new Error("Session expired or unauthorized");
+            }
+            return response;
+        }
+
+        // Load Stats
+        async function loadStats() {
+            try {
+                const res = await authenticatedFetch("/stats");
+                if (res.ok) {
+                    const data = await res.json();
+                    document.getElementById("stat-users").innerText = data.counts.users;
+                    document.getElementById("stat-articles").innerText = data.counts.verified_articles;
+                    document.getElementById("stat-raw").innerText = data.counts.raw_collected;
+                    document.getElementById("stat-nodes").innerText = data.system.uptime_nodes;
+                }
+            } catch (err) {
+                console.error("Failed to load stats", err);
+            }
+        }
+
+        // Load Configs
+        async function loadConfigs() {
+            try {
+                const res = await authenticatedFetch("/config");
+                if (res.ok) {
+                    const configs = await res.json();
+                    for (const [key, val] of Object.entries(configs)) {
+                        const input = document.getElementById(`cfg-${key}`);
+                        if (input) {
+                            input.checked = (val.toLowerCase() === "true");
+                        }
+                    }
+                }
+            } catch (err) {
+                console.error("Failed to load configs", err);
+            }
+        }
+
+        // Toggle Config Switch
+        async function toggleConfig(key) {
+            const input = document.getElementById(`cfg-${key}`);
+            const val = input.checked ? "true" : "false";
+            const alertBox = document.getElementById("action-alert");
+            alertBox.style.display = "none";
+
+            try {
+                const res = await authenticatedFetch("/config", {
+                    method: "POST",
+                    body: JSON.stringify({ [key]: val })
+                });
+                if (res.ok) {
+                    showActionMessage("Config parameters updated successfully!", "success");
+                } else {
+                    showActionMessage("Failed to update config parameter.", "error");
+                }
+            } catch (err) {
+                showActionMessage("Error: Config update timed out.", "error");
+            }
+        }
+
+        // Action controls
+        function showActionMessage(msg, type) {
+            const alertBox = document.getElementById("action-alert");
+            alertBox.innerText = msg;
+            alertBox.className = `message-alert message-${type}`;
+            alertBox.style.display = "block";
+            setTimeout(() => { alertBox.style.display = "none"; }, 5000);
+        }
+
+        async function triggerIngest() {
+            try {
+                const res = await authenticatedFetch("/trigger-ingest", { method: "POST" });
+                if (res.ok) {
+                    showActionMessage("Ingestion pipeline successfully triggered in the background!", "success");
+                } else {
+                    showActionMessage("Could not start ingestion cycle.", "error");
+                }
+            } catch (err) {
+                showActionMessage("Error triggering ingestion cycle.", "error");
+            }
+        }
+
+        async function clearCache() {
+            try {
+                const res = await authenticatedFetch("/clear-cache", { method: "POST" });
+                if (res.ok) {
+                    const data = await res.json();
+                    showActionMessage(`Translation cache cleared for ${data.articles_cleared} articles!`, "success");
+                } else {
+                    showActionMessage("Could not clear translation cache.", "error");
+                }
+            } catch (err) {
+                showActionMessage("Error clearing translation cache.", "error");
+            }
+        }
+
+        async function syncNodes() {
+            try {
+                const res = await authenticatedFetch("/refresh-digest", { method: "POST" });
+                if (res.ok) {
+                    showActionMessage("Neural nodes sync successfully initiated in background!", "success");
+                } else {
+                    showActionMessage("Could not initiate sync cycle.", "error");
+                }
+            } catch (err) {
+                showActionMessage("Error syncing news nodes.", "error");
+            }
+        }
+
+        // Load Keypools Status
+        async function loadKeypool() {
+            const keypoolBox = document.getElementById("keypool-list");
+            try {
+                const res = await authenticatedFetch("/keypool-status");
+                if (res.ok) {
+                    const data = await res.json();
+                    let html = `<div style="margin-bottom:8px; font-weight:600; color:#3b82f6;">Total Keys Registered: ${data.total}</div>`;
+                    
+                    html += `<div style="font-weight:600; color:var(--text-muted); margin-top:8px;">OpenAI Pool (${data.openai.count} keys):</div>`;
+                    if (data.openai.count === 0) {
+                        html += `<div style="color:var(--error); font-style:italic; padding-left:10px;">No keys loaded</div>`;
+                    }
+                    data.openai.keys.forEach(k => {
+                        html += `
+                        <div class="keypool-item">
+                            <span>🔑 Key #${k.index}: ${k.key}</span>
+                            <span style="color:var(--success)">${k.status.toUpperCase()}</span>
+                        </div>`;
+                    });
+
+                    html += `<div style="font-weight:600; color:var(--text-muted); margin-top:12px;">Groq Pool (${data.groq.count} keys):</div>`;
+                    if (data.groq.count === 0) {
+                        html += `<div style="color:var(--error); font-style:italic; padding-left:10px;">No keys loaded</div>`;
+                    }
+                    data.groq.keys.forEach(k => {
+                        html += `
+                        <div class="keypool-item">
+                            <span>🔑 Key #${k.index}: ${k.key}</span>
+                            <span style="color:var(--success)">${k.status.toUpperCase()}</span>
+                        </div>`;
+                    });
+
+                    keypoolBox.innerHTML = html;
+                }
+            } catch (err) {
+                keypoolBox.innerHTML = `<span style="color:var(--error)">Failed to retrieve keypool statuses.</span>`;
+            }
+        }
+    </script>
+</body>
+</html>

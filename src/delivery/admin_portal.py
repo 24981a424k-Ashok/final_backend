@@ -104,7 +104,7 @@ async def get_admin_stats(db: Session = Depends(get_db), auth: bool = Depends(ve
         },
         "system": {
             "cycle_status": "Healthy",
-            "db_engine": "Neural Edge (SQLite)",
+            "db_engine": "PostgreSQL" if "postgresql" in str(db.bind.url) else "Neural Edge (SQLite)",
             "uptime_nodes": 12
         }
     }
@@ -136,11 +136,26 @@ class AdCreate(BaseModel):
 
 class ArticleCreate(BaseModel):
     title: str
-    content: str
+    content: Optional[str] = None
+    description: Optional[str] = None
     category: str
     sub_category: Optional[str] = None
     country: str = "Global"
     impact_score: int = 5
+    image_url: Optional[str] = None
+    image_url_manual: Optional[str] = None
+    why_it_matters: Optional[str] = None
+    who_is_affected: Optional[str] = None
+    short_term_impact: Optional[str] = None
+    long_term_impact: Optional[str] = None
+    sentiment: Optional[str] = "Neutral"
+    bias_rating: Optional[str] = "Neutral"
+    credibility_score: Optional[float] = 10.0
+    lang: Optional[str] = "english"
+    summary_bullets: Optional[List[str]] = None
+    impact_tags: Optional[List[str]] = None
+    redirect_url: Optional[str] = None
+    access_link: Optional[str] = None
 
 class ArticleUpdate(BaseModel):
     title: Optional[str] = None
@@ -195,28 +210,79 @@ async def get_admin_articles(category: Optional[str] = None, db: Session = Depen
     if category and category != "All":
         query = query.filter(VerifiedNews.category == category)
     articles = query.order_by(VerifiedNews.created_at.desc()).limit(100).all()
-    return articles
+    return [a.to_dict() for a in articles]
 
 @router.post("/articles")
 async def create_admin_article(article: ArticleCreate, db: Session = Depends(get_db), auth: bool = Depends(verify_admin)):
-    new_art = VerifiedNews(
+    import uuid
+    from src.database.models import RawNews, VerifiedNews
+    
+    content_val = article.content or article.description or ""
+    image_val = article.image_url_manual or article.image_url or ""
+    redirect_val = article.redirect_url or f"https://finalbackend-production-9218.up.railway.app/article/placeholder-{uuid.uuid4()}"
+    
+    # Process custom metadata inputs with fallbacks
+    why_it_matters = article.why_it_matters or content_val
+    who_is_affected = article.who_is_affected
+    short_term_impact = article.short_term_impact
+    long_term_impact = article.long_term_impact
+    sentiment = article.sentiment or "Neutral"
+    bias_rating = article.bias_rating or "Neutral"
+    credibility_score = article.credibility_score or 10.0
+    lang = article.lang or "english"
+    summary_bullets = article.summary_bullets or ["Verified manual injection"]
+    impact_tags = article.impact_tags or []
+    
+    # 1. Create a RawNews record first so image_url and url properties function correctly on VerifiedNews
+    new_raw = RawNews(
+        source_id="manual",
+        source_name="Global Intel",
+        author="Admin",
         title=article.title,
-        content=article.content,
+        description=content_val,
+        url=redirect_val,
+        url_to_image=image_val,
+        published_at=datetime.utcnow(),
+        is_verified=True,
+        verification_score=1.0,
+        processed=True,
+        country=article.country
+    )
+    db.add(new_raw)
+    db.commit()
+    db.refresh(new_raw)
+    
+    # 2. Create the VerifiedNews record linking back to raw_news
+    new_art = VerifiedNews(
+        raw_news_id=new_raw.id,
+        title=article.title,
+        content=content_val,
         category=article.category,
         sub_category=article.sub_category,
         country=article.country,
         impact_score=article.impact_score,
-        summary_bullets=["Verified manual injection"],
-        bias_rating="Neutral",
-        credibility_score=10.0,
-        sentiment="Neutral",
-        impact_tags=[],
-        why_it_matters="Manual Admin Update",
-        published_at=datetime.utcnow()
+        summary_bullets=summary_bullets,
+        bias_rating=bias_rating,
+        credibility_score=credibility_score,
+        sentiment=sentiment,
+        impact_tags=impact_tags,
+        why_it_matters=why_it_matters,
+        who_is_affected=who_is_affected,
+        short_term_impact=short_term_impact,
+        long_term_impact=long_term_impact,
+        lang=lang,
+        published_at=datetime.utcnow(),
+        created_at=datetime.utcnow(),
+        analysis={
+            "is_manual": True,
+            "access_link": article.access_link or "",
+            "image_url": image_val
+        }
     )
     db.add(new_art)
     db.commit()
     db.refresh(new_art)
+    
     log_protocol_action(db, 'deploy', 'article', str(new_art.id), f"Manual Article: {article.title}")
     await redis_cache.clear_pattern("uniarc:bootstrap:*")
     await redis_cache.clear_pattern("uniarc:student:*")
@@ -224,15 +290,35 @@ async def create_admin_article(article: ArticleCreate, db: Session = Depends(get
 
 @router.delete("/articles/{article_id}")
 async def delete_admin_article(article_id: int, db: Session = Depends(get_db), auth: bool = Depends(verify_admin)):
+    from src.database.models import VerifiedNews, BreakingNews, SavedArticle, ReadHistory, FlaggedArticle, TrackNotification, TopicTracking, RawNews
+    
     art = db.query(VerifiedNews).filter(VerifiedNews.id == article_id).first()
     if art:
         title = art.title
+        raw_id = art.raw_news_id
+        
+        # Cascade delete referencing rows
+        db.query(BreakingNews).filter(BreakingNews.verified_news_id == article_id).delete(synchronize_session=False)
+        db.query(SavedArticle).filter(SavedArticle.news_id == article_id).delete(synchronize_session=False)
+        db.query(ReadHistory).filter(ReadHistory.news_id == article_id).delete(synchronize_session=False)
+        db.query(FlaggedArticle).filter(FlaggedArticle.news_id == article_id).delete(synchronize_session=False)
+        db.query(TrackNotification).filter(TrackNotification.news_id == article_id).delete(synchronize_session=False)
+        db.query(TopicTracking).filter(TopicTracking.news_id == article_id).delete(synchronize_session=False)
+        
         db.delete(art)
+        
+        # Also clean up the RawNews record linked to it
+        if raw_id:
+            raw = db.query(RawNews).filter(RawNews.id == raw_id).first()
+            if raw:
+                db.delete(raw)
+                
         db.commit()
         log_protocol_action(db, 'purge', 'article', str(article_id), f"Purged: {title}")
         await redis_cache.clear_pattern("uniarc:bootstrap:*")
         await redis_cache.clear_pattern("uniarc:student:*")
     return {"status": "purged"}
+
 
 @router.put("/articles/{article_id}")
 async def update_admin_article(article_id: int, payload: ArticleUpdate, db: Session = Depends(get_db), auth: bool = Depends(verify_admin)):

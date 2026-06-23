@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Retention"], prefix="/api/v2/retention")
 router_legacy = APIRouter(tags=["Retention Legacy"], prefix="/api/retention")
 router_api = APIRouter(tags=["User API"])
+from src.delivery.admin_portal import verify_admin
 
 def get_db():
     db = SessionLocal()
@@ -349,9 +350,12 @@ async def track_topic(payload: TrackTopicRequest, db: Session = Depends(get_db))
         except Exception as fe:
             logger.warning(f"[FirebaseSync] Could not fetch user from Firebase Auth: {fe}")
         
-    # Check if communication channel exists (allow either phone or email)
-    if not user.phone and not user.email:
-        return {"status": "NEED_PHONE", "message": "Email or phone number is required for intelligence alerts."}
+    # Check if communication channel exists (allow either phone, email, or push_token)
+    if not user.phone and not user.email and not user.push_token:
+        raise HTTPException(
+            status_code=400,
+            detail="Email, phone number, or push notifications must be enabled for intelligence alerts."
+        )
         
     # Get article keywords
     article_id_clean = payload.article_id
@@ -366,6 +370,18 @@ async def track_topic(payload: TrackTopicRequest, db: Session = Depends(get_db))
             news_id_to_store = None # Cannot link foreign key to RawNews in Verified-only table yet
         except:
             article_title = f"Topic {payload.article_id}"
+            keywords = [article_title]
+            news_id_to_store = None
+    elif isinstance(article_id_clean, str) and article_id_clean.startswith("http"):
+        # For external URL IDs, we look up the raw news by URL to get the title
+        try:
+            from src.database.models import RawNews
+            raw = db.query(RawNews).filter(RawNews.url == article_id_clean).first()
+            article_title = raw.title if raw else "Custom Topic"
+            keywords = [article_title]
+            news_id_to_store = None
+        except:
+            article_title = "Custom Topic"
             keywords = [article_title]
             news_id_to_store = None
     else:
@@ -427,7 +443,7 @@ async def track_topic(payload: TrackTopicRequest, db: Session = Depends(get_db))
 
 
 @router.post("/send_daily_digest_email")
-async def manual_send_daily_digest_email(db: Session = Depends(get_db)):
+async def manual_send_daily_digest_email(db: Session = Depends(get_db), auth: bool = Depends(verify_admin)):
     """
     Broadcasts the daily intelligence email digest containing the latest 3-5 verified articles
     to all registered users with email addresses.
@@ -466,4 +482,26 @@ async def manual_send_daily_digest_email(db: Session = Depends(get_db)):
         "failed_sends": fail_count,
         "articles_included": len(articles)
     }
+
+
+class PushTokenRequest(BaseModel):
+    firebase_uid: str
+    push_token: str
+
+@router.post("/register_push_token")
+@router_legacy.post("/register_push_token")
+async def register_push_token(payload: PushTokenRequest, db: Session = Depends(get_db)):
+    """Register or update a user's native device push token for FCM notifications."""
+    user = db.query(User).filter(User.firebase_uid == payload.firebase_uid).first()
+    if not user:
+        logger.info(f"[FCM] User not found for UID: {payload.firebase_uid}. Creating lazy user.")
+        user = User(firebase_uid=payload.firebase_uid, push_token=payload.push_token)
+        db.add(user)
+    else:
+        logger.info(f"[FCM] Registering push token for user ID {user.id}")
+        user.push_token = payload.push_token
+    
+    db.commit()
+    return {"status": "success", "message": "Push token registered successfully"}
+
 

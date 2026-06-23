@@ -4,6 +4,8 @@ import json
 import asyncio
 import time
 import httpx
+import re
+import html
 from typing import List, Dict, Any, Union
 from openai import AsyncOpenAI
 from src.config import settings
@@ -40,7 +42,32 @@ class NewsTranslator:
             "Japanese": "jpn_Jpan", "Spanish": "spa_Latn", "French": "fra_Latn",
             "German": "deu_Latn", "Russian": "rus_Cyrl", "Chinese": "zho_Hans",
             "Korean": "kor_Hang", "Portuguese": "por_Latn", "Turkish": "tur_Latn",
-            "Punjabi": "pan_Guru"
+            "Punjabi": "pan_Guru", "Italian": "ita_Latn", "Vietnamese": "vie_Latn",
+            "Indonesian": "ind_Latn", "Odia": "ory_Orya", "Assamese": "asm_Beng",
+            "Dutch": "nld_Latn", "Swedish": "swe_Latn", "Thai": "tha_Thai",
+            "Polish": "pol_Latn", "Urdu": "urd_Arab",
+            "Ukrainian": "ukr_Cyrl", "Persian": "pes_Arab", "Greek": "ell_Grek",
+            "Romanian": "ron_Latn", "Tagalog": "tgl_Latn", "Malay": "zsm_Latn",
+            "Hebrew": "heb_Hebr", "Finnish": "fin_Latn", "Hungarian": "hun_Latn",
+            "Czech": "ces_Latn"
+        }
+        
+        # Google Translate Language Mapping
+        self.google_lang_map = {
+            "Telugu": "te", "Hindi": "hi", "Tamil": "ta",
+            "Kannada": "kn", "Malayalam": "ml", "Marathi": "mr",
+            "Bengali": "bn", "Gujarati": "gu", "Arabic": "ar",
+            "Japanese": "ja", "Spanish": "es", "French": "fr",
+            "German": "de", "Russian": "ru", "Chinese": "zh",
+            "Korean": "ko", "Portuguese": "pt", "Turkish": "tr",
+            "Punjabi": "pa", "Italian": "it", "Vietnamese": "vi",
+            "Indonesian": "id", "Odia": "or", "Assamese": "as",
+            "Dutch": "nl", "Swedish": "sv", "Thai": "th",
+            "Polish": "pl", "Urdu": "ur",
+            "Ukrainian": "uk", "Persian": "fa", "Greek": "el",
+            "Romanian": "ro", "Tagalog": "tl", "Malay": "ms",
+            "Hebrew": "he", "Finnish": "fi", "Hungarian": "hu",
+            "Czech": "cs"
         }
         
         if not self.all_keys:
@@ -49,6 +76,23 @@ class NewsTranslator:
             logger.info(f"NewsTranslator initialized with {len(self.all_keys)} keys.")
         
         self._clients: Dict[str, AsyncOpenAI] = {}
+        
+        # NVIDIA Client setup
+        self.nvidia_keys = getattr(settings, "NVIDIA_API_KEYS", []) or [
+            "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",
+            "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"
+        ]
+        self.nvidia_clients = [
+            AsyncOpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=k)
+            for k in self.nvidia_keys
+        ]
+        # Keep single nvidia_client for backward compatibility
+        self.nvidia_client = self.nvidia_clients[0] if self.nvidia_clients else None
+        
+        if self.nvidia_clients:
+            logger.info(f"NVIDIA API client initialized with {len(self.nvidia_clients)} keys for translation fallback.")
+        else:
+            logger.warning("No NVIDIA keys found. NVIDIA translation fallback will be disabled.")
         
         # 3. External Cache (for items with ID 0)
         from pathlib import Path
@@ -75,6 +119,130 @@ class NewsTranslator:
                 json.dump(self._external_cache, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.error(f"Failed to save external translation cache: {e}")
+
+    def is_already_in_lang(self, text: str, target_lang: str) -> bool:
+        if not text or not target_lang:
+            return False
+            
+        lang_unicode_ranges = {
+            "Hindi": r"[\u0900-\u097F]",
+            "Telugu": r"[\u0c00-\u0c7F]",
+            "Tamil": r"[\u0b80-\u0bFF]",
+            "Kannada": r"[\u0c80-\u0cFF]",
+            "Malayalam": r"[\u0d00-\u0d7F]",
+            "Bengali": r"[\u0980-\u09FF]",
+            "Gujarati": r"[\u0a80-\u0aFF]",
+            "Arabic": r"[\u0600-\u06FF]",
+            "Japanese": r"[\u3040-\u30FF\u31F0-\u31FF\u4E00-\u9FFF]",
+            "Chinese": r"[\u4E00-\u9FFF]",
+            "Korean": r"[\uAC00-\uD7AF\u1100-\u11FF]",
+            "Russian": r"[\u0400-\u04FF]",
+            "Punjabi": r"[\u0A00-\u0A7F]",
+            "Odia": r"[\u0B00-\u0B7F]",
+            "Assamese": r"[\u0980-\u09FF]",
+            "Thai": r"[\u0E00-\u0E7F]",
+            "Urdu": r"[\u0600-\u06FF]"
+        }
+        
+        pattern = lang_unicode_ranges.get(target_lang.capitalize()) or lang_unicode_ranges.get(target_lang)
+        if not pattern:
+            return False
+            
+        # If the text has any characters matching the target language's script, check the count
+        matches = re.findall(pattern, text)
+        if not matches:
+            return False
+            
+        # If more than 3 characters (or 5% of non-whitespace characters) match the script, skip translation
+        non_ws_len = len([c for c in text if not c.isspace()])
+        if non_ws_len == 0:
+            return False
+        percent_match = len(matches) / non_ws_len
+        
+        return len(matches) > 3 or percent_match > 0.05
+
+    async def translate_nvidia(self, text: str, target_lang: str, attempts: int = 3) -> str:
+        """
+        Layer 3: NVIDIA API Catalog translation layer (High-speed, premium quality).
+        Used as fallback/primary high-speed translation layer.
+        """
+        if not text or not target_lang:
+            return text
+            
+        if not self.nvidia_clients:
+            return text
+            
+        for i in range(attempts):
+            client = self.nvidia_clients[i % len(self.nvidia_clients)]
+            try:
+                response = await client.chat.completions.create(
+                    model="meta/llama-3.3-70b-instruct",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": f"You are a master news journalist and professional translator. Translate the text to {target_lang}. RETURN ONLY THE TRANSLATED TEXT. DO NOT explain, do not add introductory text, do not add quotes, just return the translated text."
+                        },
+                        {"role": "user", "content": text}
+                    ],
+                    temperature=0.2,
+                    top_p=0.7,
+                    max_tokens=1024
+                )
+                return response.choices[0].message.content.strip()
+            except Exception as e:
+                logger.error(f"NVIDIA translation attempt {i+1} failed with client index {i % len(self.nvidia_clients)}: {e}")
+                if i < attempts - 1:
+                    await asyncio.sleep(1)
+        return text
+
+    async def translate_microsoft(self, text: str, target_lang: str, attempts: int = 3) -> str:
+        """
+        Layer 3.5: Microsoft Translator API (Cognitive Services translation layer).
+        High-speed, premium quality fallback.
+        """
+        if not text or not target_lang:
+            return text
+            
+        key = getattr(settings, "MICROSOFT_TRANSLATOR_KEY", None)
+        region = getattr(settings, "MICROSOFT_TRANSLATOR_REGION", "eastasia")
+        endpoint = getattr(settings, "MICROSOFT_TRANSLATOR_ENDPOINT", "https://api.cognitive.microsofttranslator.com/")
+        
+        if not key:
+            return text
+
+        ms_code = self.google_lang_map.get(target_lang.capitalize()) or self.google_lang_map.get(target_lang)
+        if not ms_code:
+            return text
+
+        url = f"{endpoint.rstrip('/')}/translate"
+        params = {
+            'api-version': '3.0',
+            'to': ms_code
+        }
+        headers = {
+            'Ocp-Apim-Subscription-Key': key,
+            'Ocp-Apim-Subscription-Region': region,
+            'Content-Type': 'application/json'
+        }
+        body = [{'text': text}]
+
+        for i in range(attempts):
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    response = await client.post(url, params=params, headers=headers, json=body)
+                    if response.status_code == 200:
+                        result = response.json()
+                        if result and isinstance(result, list) and len(result) > 0:
+                            trans_list = result[0].get("translations", [])
+                            if trans_list:
+                                return trans_list[0].get("text", text)
+                    else:
+                        logger.warning(f"Microsoft Translator API returned error {response.status_code}: {response.text}")
+            except Exception as e:
+                logger.error(f"Microsoft translation attempt {i+1} failed: {e}")
+                if i < attempts - 1:
+                    await asyncio.sleep(1)
+        return text
 
     async def verify_all_keys(self) -> Dict[str, Any]:
         """
@@ -261,11 +429,16 @@ class NewsTranslator:
         return self._clients[key], provider
 
     async def translate_text(self, text: str, target_lang: str) -> str:
-        """Translate a single piece of text to target_lang with 3-layer failover."""
+        """Translate a single piece of text to target_lang with 4-layer failover."""
         if not text or not target_lang or target_lang.lower() == 'english':
             return text
+
+        # Task 3: Language Detection Skip
+        if self.is_already_in_lang(text, target_lang):
+            logger.info(f"Skipping translation: text already in target language '{target_lang}'")
+            return text
         
-        # 1. Prepare candidate pools
+        # 1. Prepare candidate pools (Layer 1 & 2: OpenAI & Groq)
         attempt_pools = []
         if self.openai_keys: attempt_pools.append(("openai", self.openai_keys))
         if self.groq_keys: attempt_pools.append(("groq", self.groq_keys))
@@ -305,9 +478,27 @@ class NewsTranslator:
                         self._mark_key_limited(key, is_dead=is_quota)
                     continue
 
-        # 2. FINAL LAYER: NLLB EMERGENCY FALLBACK (Zero cost, infinite availability)
+        # 2. Layer 3: NVIDIA API (High-performance fallback)
+        try:
+            logger.info(f"LLM layers failed. Attempting NVIDIA translation for target lang: {target_lang}")
+            translated = await self.translate_nvidia(text, target_lang)
+            if translated and translated != text:
+                return translated
+        except Exception as ne:
+            logger.warning(f"NVIDIA translation layer failed: {ne}")
+
+        # 2.5 Layer 3.5: Microsoft Translator API (Cognitive Services fallback)
+        try:
+            logger.info(f"NVIDIA layer failed. Attempting Microsoft translation for target lang: {target_lang}")
+            translated = await self.translate_microsoft(text, target_lang)
+            if translated and translated != text:
+                return translated
+        except Exception as me:
+            logger.warning(f"Microsoft translation layer failed: {me}")
+
+        # 3. Layer 4: NLLB (Final emergency fallback)
         if target_lang in self.nllb_map:
-            logger.warning(f"LLM layers failed for {target_lang}. Using NLLB fallback.")
+            logger.warning(f"LLM, NVIDIA & Microsoft layers failed for {target_lang}. Using NLLB fallback.")
             return await self.translate_nllb(text, target_lang)
         
         return text
@@ -354,6 +545,13 @@ class NewsTranslator:
             u_indices = []
             try:
                 for idx, story in enumerate(stories):
+                    # Task 3: Language Detection Skip
+                    if self.is_already_in_lang(story.get("title", ""), target_lang):
+                        story.update({
+                            "is_translated": True,
+                            "is_cached": True
+                        })
+                        continue
                     article_id = story.get("id")
                     if article_id and str(article_id).isdigit():
                         article = db.query(VerifiedNews).filter(VerifiedNews.id == int(article_id)).first()

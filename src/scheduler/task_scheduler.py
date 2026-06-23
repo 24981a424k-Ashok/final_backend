@@ -201,8 +201,39 @@ async def run_news_cycle():
                 VerifiedNews.impact_score >= 9,
                 VerifiedNews.created_at >= (datetime.utcnow() - timedelta(minutes=60))
             ).all()
+            
+            # Broadcast SMS notifications
             for item in newly_analyzed:
                 await SmsNotifier.broadcast_breaking_news(db, item)
+                
+            # Broadcast FCM push notifications for hot articles
+            if newly_analyzed:
+                from src.database.models import TrackNotification, User
+                users = db.query(User).filter(User.push_token != None).all()
+                if users:
+                    for item in newly_analyzed:
+                        tokens_to_notify = []
+                        for user in users:
+                            # Avoid duplicate notification
+                            already_notified = db.query(TrackNotification).filter(
+                                TrackNotification.user_id == user.id,
+                                TrackNotification.news_id == item.id
+                            ).first()
+                            if not already_notified:
+                                tokens_to_notify.append(user.push_token)
+                                # Record notification history
+                                db.add(TrackNotification(user_id=user.id, news_id=item.id))
+                        
+                        if tokens_to_notify:
+                            article_url = f"https://ai-news.uniintel.com/article/{item.id}"
+                            NotificationManager.send_push_notification(
+                                tokens=tokens_to_notify,
+                                title=f"🔥 Hot Article (Impact {item.impact_score}/10)",
+                                body=item.title,
+                                data={"url": article_url, "news_id": str(item.id), "type": "hot_article"}
+                            )
+                    db.commit()
+
             await check_topic_tracking(db)
 
         # Update last run time on success
@@ -276,7 +307,7 @@ async def check_topic_tracking(db: Session):
             user = track.user
             if not user:
                 continue
-            if not user.phone and not user.email:
+            if not user.phone and not user.email and not user.push_token:
                 continue
             
             for article in new_articles:
@@ -316,6 +347,19 @@ async def check_topic_tracking(db: Session):
                             except Exception as ee:
                                 logger.warning(f"Failed to send tracking Email: {ee}")
                                 
+                        # Send Push Notification if push_token exists
+                        if user.push_token:
+                            try:
+                                article_url = f"https://ai-news.uniintel.com/article/{article.id}"
+                                NotificationManager.send_push_notification(
+                                    tokens=[user.push_token],
+                                    title=f"📡 Tracked Topic: {track.topic_keywords[0] if track.topic_keywords else 'Intelligence Alert'}",
+                                    body=article.title,
+                                    data={"url": article_url, "news_id": str(article.id), "type": "tracked_alert"}
+                                )
+                            except Exception as pe:
+                                logger.warning(f"Failed to send tracking push notification: {pe}")
+                                
                         # RECORD NOTIFICATION
                         db.add(TrackNotification(user_id=user.id, news_id=article.id))
                         db.commit()
@@ -327,31 +371,58 @@ async def check_topic_tracking(db: Session):
 
 async def pre_translate_top_stories():
     """
-    Perform background translation for the top 10 stories into major languages.
-    This ensures that when users open the app in these languages, the content is INSTANT.
+    Perform background translation for the entire DailyDigest and newly verified/analyzed
+    news articles (AOT background translation) into major target regional languages.
+    This ensures that when users open the app in these languages, all content loads instantly.
     """
     try:
-        from src.database.models import DailyDigest, SessionLocal
+        from src.database.models import DailyDigest, SessionLocal, VerifiedNews
         from src.utils.translator import NewsTranslator
         
         target_langs = ["Hindi", "Telugu", "Tamil", "Kannada", "Malayalam"]
         translator = NewsTranslator()
         
         with SessionLocal() as db:
+            # 1. Fetch latest published digest stories
             latest = db.query(DailyDigest).filter(DailyDigest.is_published == True).order_by(DailyDigest.date.desc()).first()
-            if not latest or not latest.content_json:
-                logger.warning("No digest found for pre-translation.")
-                return
-
-            top_stories = latest.content_json.get("top_stories", [])[:10]
-            if not top_stories:
-                logger.warning("Top stories empty, skipping pre-translation.")
+            digest_stories = []
+            if latest and latest.content_json:
+                for key in ["top_stories", "breaking_news", "trending_news"]:
+                    digest_stories.extend(latest.content_json.get(key, []))
+            
+            # 2. Fetch newly verified/analyzed articles from the last 2 hours
+            cutoff = datetime.utcnow() - timedelta(hours=2)
+            new_articles = db.query(VerifiedNews).filter(
+                VerifiedNews.created_at >= cutoff
+            ).all()
+            
+            newly_verified_stories = [
+                {
+                    "id": a.id,
+                    "title": a.title,
+                    "bullets": a.summary_bullets or [],
+                    "why": a.why_it_matters or "",
+                    "affected": a.who_is_affected or ""
+                }
+                for a in new_articles
+            ]
+            
+            # 3. Combine and deduplicate stories
+            all_stories_map = {}
+            for s in digest_stories + newly_verified_stories:
+                story_id = s.get("id")
+                if story_id:
+                    all_stories_map[str(story_id)] = s
+            
+            all_stories = list(all_stories_map.values())[:40]
+            if not all_stories:
+                logger.warning("No stories found for AOT pre-translation.")
                 return
             
             # Prepare data structure for translator
-            node_data = {"stories": top_stories}
+            node_data = {"stories": all_stories}
             
-            logger.info(f"Pre-translating {len(top_stories)} stories into {len(target_langs)} languages...")
+            logger.info(f"AOT Pre-translating {len(all_stories)} total stories into {len(target_langs)} languages...")
             
             # Run translations sequentially to avoid overwhelming API rate limits
             for lang in target_langs:
@@ -364,7 +435,7 @@ async def pre_translate_top_stories():
                 except Exception as lang_err:
                     logger.error(f"Pre-translation failed for {lang}: {lang_err}")
                     
-            logger.info("✅ Background Pre-translation complete.")
+            logger.info("✅ Background AOT Pre-translation complete.")
 
     except Exception as e:
         logger.error(f"Global Pre-translation error: {e}")
@@ -475,6 +546,42 @@ def start_scheduler():
         loop.run_until_complete(run_email_digest())
         loop.close()
 
+    def _run_morning_brief_push():
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        async def run_push():
+            logger.info("--- 🚨 MORNING BRIEF PUSH NOTIFICATION JOB START ---")
+            with SessionLocal() as db:
+                from src.database.models import DailyDigest
+                latest = db.query(DailyDigest).filter(DailyDigest.is_published == True).order_by(DailyDigest.date.desc()).first()
+                if latest and latest.content_json:
+                    brief_list = latest.content_json.get("brief", [])
+                    if not brief_list:
+                        brief_list = latest.content_json.get("top_stories", [])
+                    
+                    if brief_list:
+                        from src.delivery.notifications import NotificationManager
+                        formatted_brief = []
+                        for b in brief_list:
+                            title = b.get("title") or b.get("headline")
+                            if title:
+                                formatted_brief.append({"title": title})
+                        
+                        if formatted_brief:
+                            NotificationManager.send_daily_brief(db, formatted_brief)
+                            logger.info(f"Morning brief push sent with {len(formatted_brief)} items.")
+                        else:
+                            logger.warning("No titles found in brief list for push.")
+                    else:
+                        logger.warning("Brief list and top stories are empty.")
+                else:
+                    logger.warning("No published DailyDigest found for morning push.")
+                    
+        loop.run_until_complete(run_push())
+        loop.close()
+
     # FULL NEWS CYCLE (Every 15 minutes for updates)
     scheduler.add_job(
         _run_async_cycle, 
@@ -483,6 +590,18 @@ def start_scheduler():
         next_run_time=run_date, 
         id='full_news_cycle',
         max_instances=3, 
+        misfire_grace_time=3600,
+        coalesce=True
+    )
+    
+    # Daily Morning Brief Push (Everyday at 6:00 AM Asia/Kolkata)
+    scheduler.add_job(
+        _run_morning_brief_push,
+        'cron',
+        hour=6,
+        minute=0,
+        timezone='Asia/Kolkata',
+        id='daily_morning_brief_push',
         misfire_grace_time=3600,
         coalesce=True
     )

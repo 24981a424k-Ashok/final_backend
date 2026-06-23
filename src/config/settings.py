@@ -57,6 +57,19 @@ GROQ_KEY_1 = os.getenv("GROQ_KEY_1")
 GROQ_KEY_2 = os.getenv("GROQ_KEY_2")
 HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 CRICKET_API_KEY = os.getenv("CRICKET_API_KEY")
+# GOOGLE_TRANSLATE_API_KEY = os.getenv("GOOGLE_TRANSLATE_API_KEY", "AIzaSyD-G5QVTanyhBd7rKMZkJbmH86HGx65Pd8")
+NVIDIA_API_KEYS = list(filter(None, [
+    os.getenv("NVIDIA_KEY_1"),
+    os.getenv("NVIDIA_KEY_2"),
+    os.getenv("NVIDIA_API_KEY")
+]))
+NVIDIA_API_KEYS = list(dict.fromkeys(NVIDIA_API_KEYS))
+NVIDIA_API_KEY = NVIDIA_API_KEYS[0] if NVIDIA_API_KEYS else None
+
+# Microsoft Translator API Configuration
+MICROSOFT_TRANSLATOR_KEY = os.getenv("MICROSOFT_TRANSLATOR_KEY")
+MICROSOFT_TRANSLATOR_REGION = os.getenv("MICROSOFT_TRANSLATOR_REGION", "eastasia")
+MICROSOFT_TRANSLATOR_ENDPOINT = os.getenv("MICROSOFT_TRANSLATOR_ENDPOINT", "https://api.cognitive.microsofttranslator.com/")
 
 # Specialized Fallbacks (Maintained for legacy compatibility but effectively mapped to pools)
 GROQ_KEY_TELUGU = GROQ_API_KEY

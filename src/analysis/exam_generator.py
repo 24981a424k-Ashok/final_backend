@@ -23,7 +23,7 @@ class ExamGenerator:
         # Try last 24h first for maximum freshness
         news = db.query(VerifiedNews).filter(
             VerifiedNews.created_at >= last_24h,
-            VerifiedNews.impact_score >= 4
+            VerifiedNews.impact_score >= 1
         ).order_by(VerifiedNews.impact_score.desc()).limit(50).all()
         
         if not news:
@@ -90,9 +90,9 @@ class ExamGenerator:
         {news_text}
         
         RULES:
-        1. Generate exactly 15 questions.
+        1. Generate exactly 20 questions.
         2. Format: 
-           - 15 MCQs (4 options)
+           - 20 MCQs (4 options)
         3. Sections: Mix of National, International, Economy, Science, or Sports.
         4. Output JSON format ONLY:
         {{
@@ -134,8 +134,8 @@ class ExamGenerator:
                     with open(bank_path, 'r', encoding='utf-8') as f:
                         all_questions = json.load(f)
                     
-                    # Randomly select up to 3 questions
-                    count = min(len(all_questions), 15)
+                    # Randomly select up to 20 questions
+                    count = min(len(all_questions), 20)
                     selected_questions = random.sample(all_questions, count)
                     
                     # Re-index ids
@@ -185,6 +185,6 @@ class ExamGenerator:
                 return {
                     "status": "success",
                     "title": f"Daily Mock Test (Smart Fallback) - {datetime.now().strftime('%d %b %Y')}",
-                    "questions": random.sample(fallback_questions, 15)
+                    "questions": random.sample(fallback_questions, 20)
                 }
 

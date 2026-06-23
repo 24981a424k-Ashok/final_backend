@@ -36,8 +36,20 @@ from src.database.session import get_db
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 import re
-import httpx
 from src.scheduler.task_scheduler import run_news_cycle
+
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+security = HTTPBearer()
+
+_ADMIN_TOKEN = os.getenv("ADMIN_JWT_SECRET", os.getenv("ADMIN_SECRET_TOKEN"))
+if not _ADMIN_TOKEN:
+    import secrets
+    _ADMIN_TOKEN = secrets.token_hex(32)
+
+async def verify_admin(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    if not _ADMIN_TOKEN or credentials.credentials != _ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Neural Access Denied: Unauthorized")
+    return True
 
 chat_engine = NewsChatEngine()
 universe_collector = UniverseCollector()
@@ -79,6 +91,63 @@ from fastapi.responses import RedirectResponse
 async def admin_redirect():
     """Shortcut to the AI Command Center."""
     return RedirectResponse(url="/api/admin/dashboard")
+
+# --- LATEST DIGEST IN-MEMORY CACHE FOR PERFORMANCE OPTIMIZATION ---
+_LATEST_DIGEST_CACHE = {
+    "id": None,
+    "date": None,
+    "content_json": None,
+    "last_checked": 0
+}
+
+async def _get_latest_digest_content(db: Session) -> dict:
+    global _LATEST_DIGEST_CACHE
+    now = time.time()
+    
+    # Fast path: If the cache is populated and was checked within the last 60 seconds, use it.
+    if _LATEST_DIGEST_CACHE["content_json"] is not None and (now - _LATEST_DIGEST_CACHE["last_checked"] < 60):
+        return _LATEST_DIGEST_CACHE["content_json"]
+        
+    try:
+        # Query only the latest published digest's metadata to see if it changed (saves massive network transfer)
+        latest_meta = db.query(DailyDigest.id, DailyDigest.date).filter(
+            DailyDigest.is_published == True
+        ).order_by(DailyDigest.date.desc()).first()
+        
+        if not latest_meta:
+            latest_meta = db.query(DailyDigest.id, DailyDigest.date).order_by(
+                DailyDigest.date.desc()
+            ).first()
+            
+        if not latest_meta:
+            return None
+            
+        latest_id, latest_date = latest_meta
+        
+        # If cache matches the latest ID and date, update checked time and return cached content
+        if (_LATEST_DIGEST_CACHE["id"] == latest_id and 
+            _LATEST_DIGEST_CACHE["date"] == latest_date and 
+            _LATEST_DIGEST_CACHE["content_json"] is not None):
+            _LATEST_DIGEST_CACHE["last_checked"] = now
+            return _LATEST_DIGEST_CACHE["content_json"]
+            
+        # Cache miss or new digest published: fetch the full row including JSON content
+        logger.info(f"[DailyDigest Cache] Fetching content_json for digest ID {latest_id} from database...")
+        latest_row = db.query(DailyDigest).filter(DailyDigest.id == latest_id).first()
+        if latest_row and latest_row.content_json:
+            _LATEST_DIGEST_CACHE["id"] = latest_id
+            _LATEST_DIGEST_CACHE["date"] = latest_date
+            _LATEST_DIGEST_CACHE["content_json"] = latest_row.content_json
+            _LATEST_DIGEST_CACHE["last_checked"] = now
+            return _LATEST_DIGEST_CACHE["content_json"]
+            
+    except Exception as e:
+        logger.error(f"[DailyDigest Cache] Error retrieving latest digest from DB: {e}")
+        # Soft fallback: Return stale cached content if database is having issues
+        if _LATEST_DIGEST_CACHE["content_json"] is not None:
+            return _LATEST_DIGEST_CACHE["content_json"]
+            
+    return None
 
 # ---- AGGRESSIVE RECURSIVE NORMALIZATION UTILITIES ----
 def _deep_normalize_list(val):
@@ -545,23 +614,84 @@ async def api_bootstrap(
     return result
 
 
+async def cleanup_expired_manual_articles(db: Session):
+    """Deletes all manual articles that were created more than 24 hours ago."""
+    try:
+        from datetime import datetime, timedelta
+        from src.database.models import VerifiedNews, RawNews, BreakingNews, SavedArticle, ReadHistory, FlaggedArticle, TrackNotification, TopicTracking
+        
+        cutoff = datetime.utcnow() - timedelta(hours=24)
+        
+        # Find expired manual articles using a highly optimized relational join on RawNews
+        expired_articles = db.query(VerifiedNews).join(
+            RawNews, VerifiedNews.raw_news_id == RawNews.id
+        ).filter(
+            RawNews.source_id == "manual",
+            VerifiedNews.created_at < cutoff
+        ).all()
+        
+        expired_ids = []
+        for art in expired_articles:
+            analysis = art.analysis
+            if isinstance(analysis, str):
+                try:
+                    import json
+                    analysis = json.loads(analysis)
+                except Exception:
+                    analysis = {}
+            if analysis and isinstance(analysis, dict) and analysis.get("is_manual") == True:
+                expired_ids.append(art.id)
+                
+        if expired_ids:
+            logger.info(f"Cleaning up {len(expired_ids)} expired manual articles from database...")
+            # Cascade delete referencing rows
+            db.query(BreakingNews).filter(BreakingNews.verified_news_id.in_(expired_ids)).delete(synchronize_session=False)
+            db.query(SavedArticle).filter(SavedArticle.news_id.in_(expired_ids)).delete(synchronize_session=False)
+            db.query(ReadHistory).filter(ReadHistory.news_id.in_(expired_ids)).delete(synchronize_session=False)
+            db.query(FlaggedArticle).filter(FlaggedArticle.news_id.in_(expired_ids)).delete(synchronize_session=False)
+            db.query(TrackNotification).filter(TrackNotification.news_id.in_(expired_ids)).delete(synchronize_session=False)
+            db.query(TopicTracking).filter(TopicTracking.news_id.in_(expired_ids)).delete(synchronize_session=False)
+            
+            raw_ids = [art.raw_news_id for art in expired_articles if art.raw_news_id]
+            
+            db.query(VerifiedNews).filter(VerifiedNews.id.in_(expired_ids)).delete(synchronize_session=False)
+            
+            if raw_ids:
+                db.query(RawNews).filter(RawNews.id.in_(raw_ids)).delete(synchronize_session=False)
+                
+            db.commit()
+            logger.info("Cleanup completed successfully.")
+            
+            # Clear caches to ensure they disappear in real-time
+            try:
+                await redis_cache.clear_pattern("uniarc:bootstrap:*")
+                await redis_cache.clear_pattern("uniarc:student:*")
+                logger.info("Cleared Redis caches after manual article cleanup.")
+            except Exception as ce:
+                logger.error(f"Failed to clear Redis caches during manual article cleanup: {ce}")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error during manual article cleanup: {e}")
+
+
 async def _fetch_bootstrap_data(category: Optional[str], country: Optional[str], lang: str, db: Session) -> dict:
     """Core database query and computation logic for frontend bootstrap, completely decoupled from HTTP requests."""
+    # Clean up expired manual articles first to prevent them from showing up in fallback queries
+    await cleanup_expired_manual_articles(db)
+    
     # Fetch UI Translations early for potential error responses or fallbacks
     ui_labels = get_ui_translations(lang)
 
-    # Get latest digest
-    latest_digest = db.query(DailyDigest).filter(DailyDigest.is_published == True).order_by(DailyDigest.date.desc()).first()
-    if not latest_digest:
-        latest_digest = db.query(DailyDigest).order_by(DailyDigest.date.desc()).first()
+    # Get latest digest content using in-memory cache
+    latest_digest_content = await _get_latest_digest_content(db)
 
     # Auto-repair
-    if not latest_digest and db.query(VerifiedNews).count() > 0:
+    if not latest_digest_content and db.query(VerifiedNews).count() > 0:
         try:
             from src.digest.generator import DigestGenerator
             generator = DigestGenerator()
             await generator.create_daily_digest(db)
-            latest_digest = db.query(DailyDigest).filter(DailyDigest.is_published == True).order_by(DailyDigest.date.desc()).first()
+            latest_digest_content = await _get_latest_digest_content(db)
         except Exception as de:
             logger.error(f"Digest auto-repair failed: {de}")
 
@@ -608,7 +738,7 @@ async def _fetch_bootstrap_data(category: Optional[str], country: Optional[str],
 
     # Digest processing (freshness + dedup)
     import copy as _copy
-    digest_data = _copy.deepcopy(latest_digest.content_json) if latest_digest else {
+    digest_data = _copy.deepcopy(latest_digest_content) if latest_digest_content else {
         "top_stories": [], "breaking_news": [], "trending_news": [], "brief": [],
         "is_system_initializing": True
     }
@@ -802,7 +932,95 @@ async def _fetch_bootstrap_data(category: Optional[str], country: Optional[str],
             digest_data["top_stories"] = [normalize_article_data({"id": n.id, "title": n.title, "category": n.category, "bullets": n.summary_bullets or [n.title]}) for n in live_main]
             digest_data["is_system_initializing"] = False 
 
-    # Deduplicate Metadata Sections
+    # --- MANUAL ARTICLES INSERTION (1st Position Priority & 24hr Auto-Delete) ---
+    try:
+        now_utc = datetime.utcnow()
+        manual_cutoff = now_utc - timedelta(hours=24)
+        recent_manual = db.query(VerifiedNews).filter(
+            VerifiedNews.created_at >= manual_cutoff
+        ).order_by(VerifiedNews.created_at.desc()).all()
+        
+        manual_articles = []
+        for art in recent_manual:
+            analysis = art.analysis
+            if isinstance(analysis, str):
+                try:
+                    import json
+                    analysis = json.loads(analysis)
+                except Exception:
+                    analysis = {}
+            if analysis and isinstance(analysis, dict) and analysis.get("is_manual") == True:
+                normalized = normalize_article_data(art.to_dict())
+                item = {
+                    "id": art.id,
+                    "title": normalized["title"],
+                    "content": art.content or "",
+                    "category": art.category,
+                    "country": art.country or "Global",
+                    "published_at": art.created_at.isoformat() if art.created_at else now_utc.isoformat(),
+                    "created_at": art.created_at.isoformat() if art.created_at else now_utc.isoformat(),
+                    "url": art.url,
+                    "source_name": art.source_name or "Global Intel",
+                    "image_url": normalized["image_url"],
+                    "tags": normalized["tags"],
+                    "why": normalized["why_it_matters"] or art.content or "",
+                    "affected": normalized["who_is_affected"] or f"Stakeholders in {art.category}",
+                    "short_term": normalized["short_term_impact"] or "Immediate updates deployed.",
+                    "long_term": normalized["long_term_impact"] or "Stabilization expected.",
+                    "is_manual": True
+                }
+                manual_articles.append(item)
+
+        # Filter manual articles matching category and country
+        filtered_manual = []
+        for ma in manual_articles:
+            # 1. Category check
+            if category and category.lower().strip() != "all":
+                # Match using synonyms
+                def _match(art_cat, target_cat):
+                    a_cat = (art_cat or "").lower().strip()
+                    t_cat = (target_cat or "").lower().strip()
+                    syns = {
+                        "tech": "technology",
+                        "technology": "tech",
+                        "finance": "finances",
+                        "finances": "finance",
+                        "economy": "finance",
+                        "politics": "geopolitics",
+                        "geopolitics": "politics",
+                        "ai & machine learning": "ai",
+                        "ai": "ai & machine learning"
+                    }
+                    return a_cat == t_cat or syns.get(a_cat) == t_cat
+                if not _match(ma.get("category"), category):
+                    continue
+
+            # 2. Country check
+            if country and country.lower().strip() != "global":
+                target_name, match_keys, _, _ = normalize_country(country)
+                ma_country = (ma.get("country") or "Global").strip()
+                if ma_country not in match_keys and ma_country.lower() != "global":
+                    continue
+
+            filtered_manual.append(ma)
+
+        # Prepend to the top of top_stories and breaking_news
+        if filtered_manual:
+            if "top_stories" not in digest_data: digest_data["top_stories"] = []
+            # De-duplicate to avoid double prepending if already in list
+            existing_ids = {s.get("id") for s in digest_data["top_stories"] if s.get("id")}
+            to_prepend = [ma for ma in filtered_manual if ma["id"] not in existing_ids]
+            digest_data["top_stories"] = to_prepend + digest_data["top_stories"]
+
+            if "breaking_news" not in digest_data: digest_data["breaking_news"] = []
+            existing_breaking = {s.get("id") for s in digest_data["breaking_news"] if s.get("id")}
+            to_prepend_breaking = [ma for ma in filtered_manual if ma["id"] not in existing_breaking]
+            digest_data["breaking_news"] = to_prepend_breaking + digest_data["breaking_news"]
+
+            # Mark system initialization as complete since we have live manual content
+            digest_data["is_system_initializing"] = False
+    except Exception as me:
+        logger.error(f"Failed to process manual articles in bootstrap: {me}")
     for sec in ["top_stories", "breaking_news", "trending_news"]:
         if sec in digest_data:
             for s in digest_data[sec]:
@@ -844,9 +1062,15 @@ async def _fetch_bootstrap_data(category: Optional[str], country: Optional[str],
         except Exception as e:
             logger.error(f"Global API Bootstrap translation failed: {e}")
 
+    # Strip huge unused fields from the digest to optimize network payload and app responsiveness
+    if digest_data:
+        for key in ["categories", "countries", "twitter_intelligence"]:
+            if key in digest_data:
+                del digest_data[key]
+
     result = {
         "status": "success",
-        "date": latest_digest.date.strftime("%Y-%m-%d") if latest_digest else "Initializing",
+        "date": _LATEST_DIGEST_CACHE["date"].strftime("%Y-%m-%d") if _LATEST_DIGEST_CACHE["date"] else "Initializing",
         "digest": digest_data,
         "firebase_config": firebase_config,
         "left_ads": left_ads,
@@ -1049,13 +1273,11 @@ async def _async_background_article_refresh(article_id: str, lang: str, url: Opt
 @router.get("/api/breaking-news")
 async def get_breaking_news(country: str = None, db: Session = Depends(get_db)):
     """API endpoint for breaking news auto-refresh"""
-    latest_digest = db.query(DailyDigest).filter(
-        DailyDigest.is_published == True
-    ).order_by(DailyDigest.date.desc()).first()
+    latest_digest_content = await _get_latest_digest_content(db)
     
     breaking_news = []
-    if latest_digest and "breaking_news" in latest_digest.content_json:
-        breaking_news = latest_digest.content_json["breaking_news"]
+    if latest_digest_content and "breaking_news" in latest_digest_content:
+        breaking_news = latest_digest_content["breaking_news"]
         
         # 1. Standardized Filter
         if country:
@@ -1110,12 +1332,12 @@ async def get_article_status(article_id: int, db: Session = Depends(get_db)):
 @router.get("/api/more-stories/{category}/{offset}")
 async def get_more_stories(category: str, offset: int, country: str = None, lang: str = "english", db: Session = Depends(get_db)):
     """Fetch more stories for a specific category with offset"""
-    latest_digest = db.query(DailyDigest).filter(DailyDigest.is_published == True).order_by(DailyDigest.date.desc()).first()
+    latest_digest_content = await _get_latest_digest_content(db)
     
-    if not latest_digest:
+    if not latest_digest_content:
         return {"stories": []}
 
-    digest_data = latest_digest.content_json
+    digest_data = latest_digest_content
     stories = []
     
     if category == "top_stories":
@@ -1338,13 +1560,13 @@ async def subscribe_category(payload: SubscribeRequest, db: Session = Depends(ge
 # REMOVED: Mock Test HTML route (Moved to Frontend Server)
 
 @router.post("/api/sync-intelligence")
-async def force_sync_intelligence(background_tasks: BackgroundTasks):
+async def force_sync_intelligence(background_tasks: BackgroundTasks, auth: bool = Depends(verify_admin)):
     """Manually trigger a full news collection and analysis cycle"""
     background_tasks.add_task(run_news_cycle)
     return {"status": "success", "message": "Intelligence scan initiated in background."}
 
 @router.post("/api/refresh-digest")
-async def refresh_digest(db: Session = Depends(get_db)):
+async def refresh_digest(db: Session = Depends(get_db), auth: bool = Depends(verify_admin)):
     """Manually regenerate the daily digest from existing verified news"""
     from src.digest.generator import DigestGenerator
     generator = DigestGenerator()
@@ -1665,7 +1887,7 @@ async def get_all_articles(category: str = None, country: str = None, db: Sessio
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/api/articles/{article_id}")
-async def delete_article(article_id: int, db: Session = Depends(get_db)):
+async def delete_article(article_id: int, db: Session = Depends(get_db), auth: bool = Depends(verify_admin)):
     """Admin endpoint to remove an intelligence node"""
     try:
         article = db.query(VerifiedNews).filter(VerifiedNews.id == article_id).first()
@@ -1696,7 +1918,7 @@ class AdCreateRequest(BaseModel):
     target_platform: str = "both"
 
 @router.post("/api/ads")
-async def create_ad(payload: AdCreateRequest, db: Session = Depends(get_db)):
+async def create_ad(payload: AdCreateRequest, db: Session = Depends(get_db), auth: bool = Depends(verify_admin)):
     """Admin endpoint to deploy a new campaign node"""
     try:
         new_ad = Advertisement(
@@ -1730,7 +1952,7 @@ async def get_protocol_history(db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/api/ads/{ad_id}")
-async def delete_ad(ad_id: int, db: Session = Depends(get_db)):
+async def delete_ad(ad_id: int, db: Session = Depends(get_db), auth: bool = Depends(verify_admin)):
     """Remove a campaign node"""
     try:
         from src.database.models import Advertisement
@@ -1767,7 +1989,7 @@ class NewspaperCreateRequest(BaseModel):
     logo_color: str = None
 
 @router.post("/api/newspapers")
-async def create_newspaper(payload: NewspaperCreateRequest, db: Session = Depends(get_db)):
+async def create_newspaper(payload: NewspaperCreateRequest, db: Session = Depends(get_db), auth: bool = Depends(verify_admin)):
     """Register a new newspaper source"""
     try:
         from src.database.models import Newspaper
@@ -1791,7 +2013,7 @@ async def create_newspaper(payload: NewspaperCreateRequest, db: Session = Depend
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/api/newspapers/{paper_id}")
-async def delete_newspaper(paper_id: int, db: Session = Depends(get_db)):
+async def delete_newspaper(paper_id: int, db: Session = Depends(get_db), auth: bool = Depends(verify_admin)):
     """Unregister a source node"""
     try:
         from src.database.models import Newspaper
@@ -1820,7 +2042,7 @@ class ManualStudentArticleRequest(BaseModel):
     access_link: str = None
 
 @router.post("/api/student/articles")
-async def create_manual_student_article(payload: ManualStudentArticleRequest, db: Session = Depends(get_db)):
+async def create_manual_student_article(payload: ManualStudentArticleRequest, db: Session = Depends(get_db), auth: bool = Depends(verify_admin)):
     """Admin endpoint to add manual student portal articles. Handles duplicates gracefully."""
     try:
         from src.database.models import VerifiedNews, RawNews
@@ -1830,6 +2052,7 @@ async def create_manual_student_article(payload: ManualStudentArticleRequest, db
         
         if not raw:
             raw = RawNews(
+                source_id="manual",
                 title=payload.title,
                 description=payload.description,
                 url=payload.redirect_url,
@@ -1869,7 +2092,7 @@ async def create_manual_student_article(payload: ManualStudentArticleRequest, db
                 why_it_matters=payload.description[:200],
                 sentiment="Neutral",
                 is_verified=True,
-                analysis={"access_link": payload.access_link},
+                analysis={"access_link": payload.access_link, "is_manual": True},
                 published_at=datetime.utcnow()
             )
             db.add(verified)
@@ -1888,6 +2111,7 @@ async def create_manual_student_article(payload: ManualStudentArticleRequest, db
                 try: current_analysis = json.loads(current_analysis)
                 except: current_analysis = {}
             current_analysis["access_link"] = payload.access_link
+            current_analysis["is_manual"] = True
             verified.analysis = current_analysis
 
         # 3. Finalize Atomic Transaction with extra safety
@@ -1920,7 +2144,7 @@ async def create_manual_student_article(payload: ManualStudentArticleRequest, db
         raise HTTPException(status_code=503, detail=f"Infrastructure Sync Fail: {str(e)}")
 
 @router.put("/api/articles/{article_id}")
-async def update_article(article_id: int, payload: ManualStudentArticleRequest, db: Session = Depends(get_db)):
+async def update_article(article_id: int, payload: ManualStudentArticleRequest, db: Session = Depends(get_db), auth: bool = Depends(verify_admin)):
     """Admin endpoint to update an existing article node."""
     try:
         from src.database.models import VerifiedNews, RawNews
@@ -1941,6 +2165,7 @@ async def update_article(article_id: int, payload: ManualStudentArticleRequest, 
             except: current_analysis = {}
         
         current_analysis["access_link"] = payload.access_link
+        current_analysis["is_manual"] = True
         article.analysis = current_analysis
 
         # Update Raw link if exists
@@ -1972,7 +2197,7 @@ async def update_article(article_id: int, payload: ManualStudentArticleRequest, 
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/api/articles/{article_id}")
-async def delete_article(article_id: int, db: Session = Depends(get_db)):
+async def delete_article(article_id: int, db: Session = Depends(get_db), auth: bool = Depends(verify_admin)):
     """Admin endpoint to delete an intelligence node."""
     try:
         from src.database.models import VerifiedNews
@@ -2333,6 +2558,7 @@ async def _fetch_newsdata_student_articles(db: Session, country_code: str):
 
 async def _update_student_cache_if_needed(db: Session, force: bool = False, country: str = "Global", local_only: bool = False):
     """Manages the background aggregation of both internal verified news and external student-specific news feeds."""
+    await cleanup_expired_manual_articles(db)
     now = datetime.utcnow()
     target_name, country_keys, _, actual_code = normalize_country(country)
     country_key = target_name.lower()
@@ -2401,7 +2627,21 @@ async def _update_student_cache_if_needed(db: Session, force: bool = False, coun
         
     # Process Internal (Apply classification logic)
     for art in raw_articles:
-        if not is_student_article_logic(art): continue
+        # Determine if it's a manual admin article
+        is_manual = False
+        analysis = art.analysis
+        if analysis:
+            if isinstance(analysis, str):
+                try:
+                    import json
+                    analysis = json.loads(analysis)
+                except Exception:
+                    analysis = {}
+            if isinstance(analysis, dict):
+                is_manual = analysis.get("is_manual") == True
+            
+        # Manual articles bypass automatic classification filters
+        if not is_manual and not is_student_article_logic(art): continue
         
         art_url = art.url
         if not art_url or not art_url.startswith("http"):
@@ -2411,18 +2651,25 @@ async def _update_student_cache_if_needed(db: Session, force: bool = False, coun
         if dup_key in seen_urls: continue
         seen_urls.add(dup_key)
         
-        # Map into exact categories requested by the user
-        combined_text = f"{art.title} {art.content} {art.why_it_matters} {art.category}".lower()
-        if any(k in combined_text for k in ["scholarship", "internship", "fellowship", "stipend"]):
-            cat = "Scholarships & Internships"
-        elif any(k in combined_text for k in ["jee", "neet", "cuet", "upsc", "ssc", "board exam", "exam result", "admit card"]):
-            cat = "Exams & Results"
-        elif any(k in combined_text for k in ["admission", "course", "study abroad", "university", "college", "bachelors", "masters"]):
-            cat = "Admissions & Courses"
-        elif any(k in combined_text for k in ["job", "recruitment", "fresher", "placement", "hiring", "career", "salary"]):
-            cat = "Career & Jobs"
+        if is_manual:
+            # 24-hour auto-expiration check
+            age = datetime.utcnow() - (art.created_at or datetime.utcnow())
+            if age.total_seconds() >= 86400: # 24 hours
+                continue # Expired, auto-delete from app
+            cat = art.category
         else:
-            cat = "All Updates"
+            # Map into exact categories requested by the user
+            combined_text = f"{art.title} {art.content} {art.why_it_matters} {art.category}".lower()
+            if any(k in combined_text for k in ["scholarship", "internship", "fellowship", "stipend"]):
+                cat = "Scholarships & Internships"
+            elif any(k in combined_text for k in ["jee", "neet", "cuet", "upsc", "ssc", "board exam", "exam result", "admit card"]):
+                cat = "Exams & Results"
+            elif any(k in combined_text for k in ["admission", "course", "study abroad", "university", "college", "bachelors", "masters"]):
+                cat = "Admissions & Courses"
+            elif any(k in combined_text for k in ["job", "recruitment", "fresher", "placement", "hiring", "career", "salary"]):
+                cat = "Career & Jobs"
+            else:
+                cat = "All Updates"
         
         # Use existing normalization for consistency
         normalized = normalize_article_data(art.to_dict())
@@ -2436,15 +2683,16 @@ async def _update_student_cache_if_needed(db: Session, force: bool = False, coun
             "source_name": art.source_name or "Global Intel",
             "image_url": normalized["image_url"],
             "tags": normalized["tags"],
-            "trend_score": 100 if (art.impact_score or 0) > 8 else 85,
-            "urgency": "High" if (art.impact_score or 0) > 9 else "Medium"
+            "trend_score": 1000 if is_manual else (100 if (art.impact_score or 0) > 8 else 85),
+            "urgency": "High" if (is_manual or (art.impact_score or 0) > 9) else "Medium",
+            "is_manual": is_manual
         }
         processed_articles.append(item)
         category_counts[cat] += 1
         category_counts["All Updates"] += 1
         if "Scholarship" in cat: scholarship_count += 1
 
-    # Sort by impact/trend then date
+    # Sort by impact/trend then date (manual articles sorted above everything else using trend_score=1000)
     processed_articles.sort(key=lambda x: (x.get("trend_score", 0), x.get("published_at", "")), reverse=True)
     
     # Update Cache
@@ -2686,7 +2934,7 @@ async def verify_twilio_otp(payload: dict = Body(...), db: Session = Depends(get
 
 @router.post("/api/v2/articles/{article_id}/update")
 @router.post("/api/articles/{article_id}/update")
-async def update_article_analysis(article_id: int, db: Session = Depends(get_db)):
+async def update_article_analysis(article_id: int, db: Session = Depends(get_db), auth: bool = Depends(verify_admin)):
     """Consolidated Article Update: Request fresh AI analysis for a specific article."""
     try:
         article = db.query(VerifiedNews).filter(VerifiedNews.id == article_id).first()
