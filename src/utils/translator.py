@@ -78,10 +78,7 @@ class NewsTranslator:
         self._clients: Dict[str, AsyncOpenAI] = {}
         
         # NVIDIA Client setup
-        self.nvidia_keys = getattr(settings, "NVIDIA_API_KEYS", []) or [
-            "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",
-            "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"
-        ]
+        self.nvidia_keys = getattr(settings, "NVIDIA_API_KEYS", [])
         self.nvidia_clients = [
             AsyncOpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=k)
             for k in self.nvidia_keys
