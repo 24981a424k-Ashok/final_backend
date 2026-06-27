@@ -52,6 +52,7 @@ class NotificationManager:
     async def notify_subscribers(db: Session, category: str, news_title: str, news_url: str, news_id: int):
         """Find users subscribed to a category and notify them via all available channels. Ensures no duplicates."""
         from src.database.models import TrackNotification, User, Subscription
+        from datetime import datetime
         
         subscribers = db.query(User).join(Subscription).filter(
             (Subscription.category == category) | (Subscription.category == "All")
@@ -68,6 +69,16 @@ class NotificationManager:
             
             if already_notified:
                 logger.info(f"Skipping duplicate notification for User {user.id} - News {news_id}")
+                continue
+
+            # Check daily notification limit (5 per day max)
+            today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            sent_today = db.query(TrackNotification).filter(
+                TrackNotification.user_id == user.id,
+                TrackNotification.notified_at >= today_start
+            ).count()
+            if sent_today >= 5:
+                logger.info(f"Notification limit reached for User {user.id} ({sent_today} sent today). Skipping.")
                 continue
 
             # Add to history

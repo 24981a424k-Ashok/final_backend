@@ -236,9 +236,18 @@ async def run_news_cycle():
                                 TrackNotification.news_id == item.id
                             ).first()
                             if not already_notified:
-                                tokens_to_notify.append(user.push_token)
-                                # Record notification history
-                                db.add(TrackNotification(user_id=user.id, news_id=item.id))
+                                # Check daily notification limit (5 per day max)
+                                today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                                sent_today = db.query(TrackNotification).filter(
+                                    TrackNotification.user_id == user.id,
+                                    TrackNotification.notified_at >= today_start
+                                ).count()
+                                if sent_today < 5:
+                                    tokens_to_notify.append(user.push_token)
+                                    # Record notification history
+                                    db.add(TrackNotification(user_id=user.id, news_id=item.id))
+                                else:
+                                    logger.info(f"Notification limit reached for User {user.id} ({sent_today} sent today). Skipping.")
                         
                         if tokens_to_notify:
                             article_url = f"https://ai-news.uniintel.com/article/{item.id}"
@@ -342,6 +351,16 @@ async def check_topic_tracking(db: Session):
                     ).first()
                     
                     if not already_notified:
+                        # Check daily notification limit (5 per day max)
+                        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                        sent_today = db.query(TrackNotification).filter(
+                            TrackNotification.user_id == user.id,
+                            TrackNotification.notified_at >= today_start
+                        ).count()
+                        if sent_today >= 5:
+                            logger.info(f"Notification limit reached for User {user.id} ({sent_today} sent today). Skipping.")
+                            continue
+
                         logger.info(f"Topic Match Found! Notifying user {user.id} for '{article.title}'")
                         
                         # Send SMS if phone exists
