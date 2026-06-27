@@ -237,6 +237,65 @@ class NewsTranslator:
                         logger.warning(f"Microsoft Translator API returned error {response.status_code}: {response.text}")
             except Exception as e:
                 logger.error(f"Microsoft translation attempt {i+1} failed: {e}")
+        return text
+
+    async def translate_deepl(self, text: str, target_lang: str, attempts: int = 3) -> str:
+        """
+        Layer 2.8: DeepL Translator API.
+        High-speed, premium quality fallback.
+        """
+        if not text or not target_lang:
+            return text
+            
+        key = getattr(settings, "DEEPL_API_KEY", None)
+        if not key:
+            return text
+
+        deepl_map = {
+            "Telugu": None, "Hindi": "HI", "Tamil": None, "Kannada": None, "Malayalam": None,
+            "Marathi": None, "Bengali": None, "Gujarati": None, "Arabic": "AR",
+            "Japanese": "JA", "Spanish": "ES", "French": "FR", "German": "DE",
+            "Russian": "RU", "Chinese": "ZH", "Korean": "KO", "Portuguese": "PT",
+            "Turkish": "TR", "Punjabi": None, "Italian": "IT", "Vietnamese": None,
+            "Indonesian": "ID", "Odia": None, "Assamese": None, "Dutch": "NL",
+            "Swedish": "SV", "Thai": None, "Polish": "PL", "Urdu": None,
+            "Ukrainian": "UK", "Persian": None, "Greek": "EL", "Romanian": "RO",
+            "Tagalog": None, "Malay": None, "Hebrew": None, "Finnish": "FI",
+            "Hungarian": "HU", "Czech": "CS"
+        }
+
+        lang_code = deepl_map.get(target_lang.capitalize()) or deepl_map.get(target_lang)
+        if not lang_code:
+            logger.info(f"Language '{target_lang}' is not supported by DeepL. Skipping to next layer.")
+            return text
+
+        is_free = key.endswith(":fx")
+        endpoint = "https://api-free.deepl.com/v2/translate" if is_free else "https://api.deepl.com/v2/translate"
+
+        headers = {
+            "Authorization": f"DeepL-Auth-Key {key}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "text": [text],
+            "target_lang": lang_code
+        }
+
+        for i in range(attempts):
+            try:
+                import httpx
+                async with httpx.AsyncClient(timeout=10) as client:
+                    response = await client.post(endpoint, headers=headers, json=payload)
+                    if response.status_code == 200:
+                        data = response.json()
+                        translations = data.get("translations", [])
+                        if translations:
+                            return translations[0].get("text", text)
+                    else:
+                        logger.warning(f"DeepL API returned error {response.status_code}: {response.text}")
+            except Exception as e:
+                logger.error(f"DeepL translation attempt {i+1} failed: {e}")
                 if i < attempts - 1:
                     await asyncio.sleep(1)
         return text
@@ -475,6 +534,15 @@ class NewsTranslator:
                         self._mark_key_limited(key, is_dead=is_quota)
                     continue
 
+        # 1.8 Layer 2.8: DeepL Translator API (High-performance fallback, placed above Microsoft)
+        try:
+            logger.info(f"LLM layers failed. Attempting DeepL translation for target lang: {target_lang}")
+            translated = await self.translate_deepl(text, target_lang)
+            if translated and translated != text:
+                return translated
+        except Exception as de:
+            logger.warning(f"DeepL translation layer failed: {de}")
+
         # 2. Layer 3: Microsoft Translator API (Cognitive Services fallback)
         try:
             logger.info(f"LLM layers failed. Attempting Microsoft translation for target lang: {target_lang}")
@@ -615,10 +683,32 @@ class NewsTranslator:
             batches = [to_translate_full[i:i + batch_size] for i in range(0, len(to_translate_full), batch_size)]
             
             async def translate_batch(batch_items, b_idx):
+                # BATCH FAILBACK: Parallel single-item translation fallback
+                async def translate_item_safe(item):
+                    try:
+                        title = item.get("title") or item.get("headline")
+                        bullets = item.get("bullets") or item.get("summary_bullets") or []
+                        if isinstance(bullets, str):
+                            bullets = [bullets]
+                        why = item.get("why") or item.get("why_it_matters") or item.get("summary")
+                        affected = item.get("affected") or item.get("who_is_affected")
+                        
+                        t_task = self.translate_text(title, target_lang)
+                        b_tasks = [self.translate_text(b, target_lang) for b in bullets]
+                        w_task = self.translate_text(why, target_lang)
+                        a_task = self.translate_text(affected, target_lang)
+                        
+                        t, b, w, a = await asyncio.gather(t_task, asyncio.gather(*b_tasks), w_task, a_task)
+                        return {"id": item.get("id"), "t": t, "b": b, "w": w, "a": a}
+                    except Exception as e:
+                        logger.error(f"Single item fallback failed: {e}")
+                        return {"id": item.get("id"), "t": item.get("title") or item.get("headline"), "b": item.get("bullets") or item.get("summary_bullets") or [], "w": item.get("why") or item.get("why_it_matters") or item.get("summary"), "a": item.get("affected") or item.get("who_is_affected")}
+
                 async with self._concurrency_limit:
                     key, k_idx = self._get_best_key()
                     if not key:
-                        return []
+                        logger.warning("No active LLM keys available for batch translation. Falling back directly to individual translators (DeepL/Microsoft).")
+                        return await asyncio.gather(*[translate_item_safe(item) for item in batch_items])
                     client, provider = self._get_client_by_key(key)
                     await asyncio.sleep(b_idx * 0.4) 
                 
@@ -667,27 +757,6 @@ class NewsTranslator:
                         break
                     client, provider = self._get_client_by_key(key)
                 
-                # BATCH FAILBACK: Parallel single-item translation fallback
-                async def translate_item_safe(item):
-                    try:
-                        title = item.get("title") or item.get("headline")
-                        bullets = item.get("bullets") or item.get("summary_bullets") or []
-                        if isinstance(bullets, str):
-                            bullets = [bullets]
-                        why = item.get("why") or item.get("why_it_matters") or item.get("summary")
-                        affected = item.get("affected") or item.get("who_is_affected")
-                        
-                        t_task = self.translate_text(title, target_lang)
-                        b_tasks = [self.translate_text(b, target_lang) for b in bullets]
-                        w_task = self.translate_text(why, target_lang)
-                        a_task = self.translate_text(affected, target_lang)
-                        
-                        t, b, w, a = await asyncio.gather(t_task, asyncio.gather(*b_tasks), w_task, a_task)
-                        return {"id": item.get("id"), "t": t, "b": b, "w": w, "a": a}
-                    except Exception as e:
-                        logger.error(f"Single item fallback failed: {e}")
-                        return {"id": item.get("id"), "t": item.get("title") or item.get("headline"), "b": item.get("bullets") or item.get("summary_bullets") or [], "w": item.get("why") or item.get("why_it_matters") or item.get("summary"), "a": item.get("affected") or item.get("who_is_affected")}
-
                 return await asyncio.gather(*[translate_item_safe(item) for item in batch_items])
 
             batch_results = await asyncio.gather(*[translate_batch(b, i) for i, b in enumerate(batches)])

@@ -71,6 +71,9 @@ MICROSOFT_TRANSLATOR_KEY = os.getenv("MICROSOFT_TRANSLATOR_KEY")
 MICROSOFT_TRANSLATOR_REGION = os.getenv("MICROSOFT_TRANSLATOR_REGION", "eastasia")
 MICROSOFT_TRANSLATOR_ENDPOINT = os.getenv("MICROSOFT_TRANSLATOR_ENDPOINT", "https://api.cognitive.microsofttranslator.com/")
 
+# DeepL API Configuration
+DEEPL_API_KEY = os.getenv("DEEPL_API_KEY")
+
 # Specialized Fallbacks (Maintained for legacy compatibility but effectively mapped to pools)
 GROQ_KEY_TELUGU = GROQ_API_KEY
 GROQ_KEY_HINDI = GROQ_API_KEY
