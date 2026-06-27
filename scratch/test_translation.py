@@ -1,33 +1,59 @@
-import asyncio
-import logging
 import sys
 import os
+import asyncio
 
-# PATH SETUP
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Configure terminal stdout/stderr to support Unicode characters on Windows
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except AttributeError:
+        pass
+
+# Setup path so we can import src
+BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if BACKEND_DIR not in sys.path:
+    sys.path.insert(0, BACKEND_DIR)
 
 from src.utils.translator import NewsTranslator
-from src.config import settings
 
-async def test_translation():
-    logging.basicConfig(level=logging.INFO)
+async def main():
+    print("Initializing NewsTranslator...")
     translator = NewsTranslator()
     
-    test_text = "Google has announced a major breakthrough in quantum computing, achieving state-of-the-art performance."
-    target_lang = "Hindi"
+    print("\nAPI Keys registered:")
+    print(f"Total keys: {len(translator.all_keys)}")
+    print(f"OpenAI keys: {len(translator.openai_keys)}")
+    print(f"Groq keys: {len(translator.groq_keys)}")
+    print(f"NVIDIA keys: {len(translator.nvidia_keys)}")
     
-    print(f"Testing translation to {target_lang}...")
-    result = await translator.translate_text(test_text, target_lang)
+    test_text = "The quick brown fox jumps over the lazy dog."
+    target_languages = ["Hindi", "Telugu", "Spanish"]
     
-    # Safely print using sys.stdout buffer with utf-8 encoding to avoid Windows console errors
-    sys.stdout.reconfigure(encoding='utf-8')
-    print("Original:", test_text)
-    print("Translated:", result)
-    
-    if result and result != test_text:
-        print("SUCCESS: Translation working.")
-    else:
-        print("FAILURE: Translation failed or returned original text.")
+    print(f"\nTesting translation of: '{test_text}'")
+    results = {}
+    for lang in target_languages:
+        try:
+            print(f"Translating to {lang}...")
+            result = await translator.translate_text(test_text, lang)
+            print(f"Result in {lang}: '{result}'")
+            results[lang] = result
+            if result == test_text:
+                print(f"Warning: Result is identical to input (translation might have fallen back/skipped).")
+            else:
+                print(f"Success!")
+        except Exception as e:
+            print(f"Failed to translate to {lang}: {e}")
+            
+    # Write translation output to a log file to verify contents
+    output_path = os.path.join(BACKEND_DIR, "scratch", "translation_results.txt")
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("=== Translation Verification Output ===\n")
+        f.write(f"Source text: {test_text}\n\n")
+        for lang, val in results.items():
+            f.write(f"Language: {lang}\n")
+            f.write(f"Translated: {val}\n\n")
+    print(f"\nResults successfully written to: {output_path}")
 
 if __name__ == "__main__":
-    asyncio.run(test_translation())
+    asyncio.run(main())

@@ -3070,3 +3070,107 @@ async def admin_trigger_cycle(background_tasks: BackgroundTasks, db: Session = D
     """Manually triggers the background news cycle for stabilization testing."""
     background_tasks.add_task(run_news_cycle)
     return {"status": "success", "message": "News cycle triggered in background. Check Railway logs for progress."}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AI BRIEFS — "Stay Ahead with AI"
+# Endpoint: GET /api/v2/ai-briefs
+# ─────────────────────────────────────────────────────────────────────────────
+_AI_BRIEFS_CACHE: Dict[str, Any] = {}
+_AI_BRIEFS_CACHE_TTL = 300  # 5 minutes
+
+@router.get("/api/v2/ai-briefs")
+async def get_ai_briefs(
+    page: int = 1,
+    page_size: int = 20,
+    filter: str = "all",       # all | Research Paper | Company Blog | News | Community | Product | Newsletter
+    lang: str = "english",
+    db: Session = Depends(get_db),
+):
+    """
+    Returns paginated AI-specific articles (AI Briefs / Stay Ahead with AI).
+    Sources: arXiv, HuggingFace, OpenAI Blog, Anthropic, DeepMind, TechCrunch AI,
+             HackerNews, Product Hunt, MIT Tech Review, and many more.
+    Research papers include 5-6 bullet summaries; articles include 3 bullets.
+    """
+    import time as _time
+
+    cache_key = f"ai_briefs:{page}:{page_size}:{filter}:{lang}"
+    now_ts = _time.time()
+
+    # Serve from cache if fresh
+    cached = _AI_BRIEFS_CACHE.get(cache_key)
+    if cached and (now_ts - cached["ts"]) < _AI_BRIEFS_CACHE_TTL:
+        return cached["data"]
+
+    try:
+        query = db.query(VerifiedNews).filter(VerifiedNews.category == "AI Tech")
+
+        # Sub-category filter
+        if filter and filter.lower() not in ("all", ""):
+            query = query.filter(VerifiedNews.sub_category == filter)
+
+        total = query.count()
+        offset = (page - 1) * page_size
+        articles = (
+            query
+            .order_by(VerifiedNews.published_at.desc(), VerifiedNews.created_at.desc())
+            .offset(offset)
+            .limit(page_size)
+            .all()
+        )
+
+        serialized = []
+        for a in articles:
+            analysis = a.analysis or {}
+            bullets = a.summary_bullets or []
+
+            # Translate bullets if non-English
+            if lang and lang.lower() not in ("english", "en") and bullets:
+                try:
+                    translated_cache = a.translation_cache or {}
+                    if lang in translated_cache and translated_cache[lang].get("bullets"):
+                        bullets = translated_cache[lang]["bullets"]
+                    else:
+                        # On-the-fly translation (quick, uses existing pool)
+                        translated_title = await translator.translate_text(a.title, lang)
+                        translated_bullets = await translator.translate_text(
+                            "\n".join(bullets), lang
+                        )
+                        bullets = translated_bullets.split("\n") if translated_bullets else bullets
+                except Exception:
+                    pass  # Fall back to English bullets
+
+            serialized.append({
+                "id": a.id,
+                "title": a.title,
+                "url": a.url,
+                "image_url": a.image_url,
+                "source_name": a.source_name,
+                "source_id": analysis.get("source_id", "ai-tech"),
+                "sub_category": a.sub_category or "News",
+                "summary_bullets": bullets,
+                "is_research_paper": analysis.get("is_research_paper", False),
+                "authors": analysis.get("authors", []),
+                "upvotes": analysis.get("upvotes", 0),
+                "published_at": a.published_at.isoformat() if a.published_at else None,
+                "impact_score": a.impact_score,
+                "sentiment": a.sentiment,
+            })
+
+        result = {
+            "status": "success",
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "has_more": (offset + page_size) < total,
+            "articles": serialized,
+        }
+
+        _AI_BRIEFS_CACHE[cache_key] = {"data": result, "ts": now_ts}
+        return result
+
+    except Exception as e:
+        logger.error(f"AI Briefs endpoint error: {e}")
+        return {"status": "error", "message": "Failed to load AI Briefs.", "articles": []}
+

@@ -81,23 +81,35 @@ async def run_news_cycle():
                 logger.error(f"GNews Collector failed: {e}")
                 return 0
 
+        async def fetch_ai_tech():
+            """Collect AI Briefs — AI news, research papers, company blogs (every 15 min)."""
+            try:
+                from src.collectors.ai_tech_collector import AiTechCollector
+                collector = AiTechCollector()
+                return await asyncio.to_thread(collector.fetch_and_save)
+            except Exception as e:
+                logger.error(f"AI Tech Collector failed: {e}")
+                return 0
+
         # Run all collectors in parallel
         results = await asyncio.gather(
             fetch_api(),
             fetch_rss(),
             fetch_twitter(),
             fetch_trending(),
-            fetch_gnews()
+            fetch_gnews(),
+            fetch_ai_tech()
         )
         
-        api_count, rss_count, twitter_result, trending_result, gnews_count = results
+        api_count, rss_count, twitter_result, trending_result, gnews_count, ai_tech_count = results
         
         # Safe count extraction
         t_count = twitter_result.get('new', 0) if isinstance(twitter_result, dict) else (twitter_result or 0)
         s_count = trending_result.get('new', 0) if isinstance(trending_result, dict) else (trending_result or 0)
+        ai_t_count = ai_tech_count if isinstance(ai_tech_count, int) else 0
         
-        total_count = api_count + rss_count + t_count + s_count + gnews_count
-        logger.info(f"✅ Collection complete. Total new articles: {total_count}")
+        total_count = api_count + rss_count + t_count + s_count + gnews_count + ai_t_count
+        logger.info(f"✅ Collection complete. Total new articles: {total_count} (AI Briefs: {ai_t_count})")
         
         # 2. Verify
         logger.info("Step 2: Verification")
@@ -184,9 +196,13 @@ async def run_news_cycle():
                 db.commit()
                 logger.info(f"AI Intelligence applied to {len(unanalyzed)} articles.")
             
-            # Cleanup
-            db.execute(text("DELETE FROM raw_news WHERE processed = true AND collected_at < :cutoff"), 
-                      {"cutoff": datetime.utcnow() - timedelta(days=2)})
+            # Cleanup un-verified processed raw news (exclude news that became verified)
+            db.execute(text("""
+                DELETE FROM raw_news 
+                WHERE processed = true 
+                  AND collected_at < :cutoff 
+                  AND id NOT IN (SELECT raw_news_id FROM verified_news WHERE raw_news_id IS NOT NULL)
+            """), {"cutoff": datetime.utcnow() - timedelta(days=2)})
             db.commit()
 
         # 5. Final Digest Update

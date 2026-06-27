@@ -420,7 +420,7 @@ class NewsTranslator:
             if is_groq:
                 self._clients[key] = AsyncOpenAI(api_key=key, base_url=GROQ_BASE_URL, max_retries=0)
             else:
-                self._clients[key] = AsyncOpenAI(api_key=key, max_retries=0)
+                self._clients[key] = AsyncOpenAI(api_key=key, base_url="https://api.openai.com/v1", max_retries=0)
         
         provider = "Groq" if is_groq else "OpenAI"
         return self._clients[key], provider
@@ -475,58 +475,41 @@ class NewsTranslator:
                         self._mark_key_limited(key, is_dead=is_quota)
                     continue
 
-        # 2. Layer 3: NVIDIA API (High-performance fallback)
+        # 2. Layer 3: Microsoft Translator API (Cognitive Services fallback)
         try:
-            logger.info(f"LLM layers failed. Attempting NVIDIA translation for target lang: {target_lang}")
-            translated = await self.translate_nvidia(text, target_lang)
-            if translated and translated != text:
-                return translated
-        except Exception as ne:
-            logger.warning(f"NVIDIA translation layer failed: {ne}")
-
-        # 2.5 Layer 3.5: Microsoft Translator API (Cognitive Services fallback)
-        try:
-            logger.info(f"NVIDIA layer failed. Attempting Microsoft translation for target lang: {target_lang}")
+            logger.info(f"LLM layers failed. Attempting Microsoft translation for target lang: {target_lang}")
             translated = await self.translate_microsoft(text, target_lang)
             if translated and translated != text:
                 return translated
         except Exception as me:
             logger.warning(f"Microsoft translation layer failed: {me}")
 
+        # 2.5 Layer 3.5: NVIDIA API (High-performance fallback)
+        try:
+            logger.info(f"Microsoft layer failed. Attempting NVIDIA translation for target lang: {target_lang}")
+            translated = await self.translate_nvidia(text, target_lang)
+            if translated and translated != text:
+                return translated
+        except Exception as ne:
+            logger.warning(f"NVIDIA translation layer failed: {ne}")
+
         # 3. Layer 4: NLLB (Final emergency fallback)
         if target_lang in self.nllb_map:
-            logger.warning(f"LLM, NVIDIA & Microsoft layers failed for {target_lang}. Using NLLB fallback.")
+            logger.warning(f"LLM, Microsoft & NVIDIA layers failed for {target_lang}. Using NLLB fallback.")
             return await self.translate_nllb(text, target_lang)
         
         return text
 
-
     async def translate_stories(self, stories: List[Dict[str, Any]], target_lang: str) -> List[Dict[str, Any]]:
-        """Translate multiple stories with parallel execution."""
+        """Translate multiple stories with parallel execution and DB caching."""
         if not stories or not target_lang or target_lang.lower() == 'english':
             return stories
 
+        target_lang = target_lang.strip().capitalize()
         translated_stories = json.loads(json.dumps(stories))
-        
-        async def translate_single_story(story):
-            if 'bullets' in story and story['bullets']:
-                story['bullets'] = await asyncio.gather(*[self.translate_text(b, target_lang) for b in story['bullets']])
-            
-            fields_to_translate = ['title', 'summary', 'why', 'affected', 'headline']
-            for field in fields_to_translate:
-                if field in story and story[field]:
-                    story[field] = await self.translate_text(story[field], target_lang)
-            return story
-
-        results = []
-        batch_size = 3
-        for i in range(0, len(translated_stories), batch_size):
-            batch = translated_stories[i:i+batch_size]
-            results.extend(await asyncio.gather(*[translate_single_story(s) for s in batch]))
-            if i + batch_size < len(translated_stories):
-                await asyncio.sleep(0.3)
-
-        return results
+        node_data = {"stories": translated_stories}
+        await self.translate_node_bulk(node_data, target_lang)
+        return node_data.get("stories", translated_stories)
 
     async def translate_node_bulk(self, node_data: Dict[str, Any], target_lang: str) -> Dict[str, Any]:
         """Translate entire node dashboard with DB caching and NLLB fallback."""
@@ -541,6 +524,18 @@ class NewsTranslator:
             db = SessionLocal()
             u_indices = []
             try:
+                # Batch retrieve all articles in a single query
+                article_ids = []
+                for story in stories:
+                    art_id = story.get("id")
+                    if art_id and str(art_id).isdigit():
+                        article_ids.append(int(art_id))
+                
+                articles_map = {}
+                if article_ids:
+                    db_articles = db.query(VerifiedNews).filter(VerifiedNews.id.in_(article_ids)).all()
+                    articles_map = {a.id: a for a in db_articles}
+
                 for idx, story in enumerate(stories):
                     # Task 3: Language Detection Skip
                     if self.is_already_in_lang(story.get("title", ""), target_lang):
@@ -551,7 +546,7 @@ class NewsTranslator:
                         continue
                     article_id = story.get("id")
                     if article_id and str(article_id).isdigit():
-                        article = db.query(VerifiedNews).filter(VerifiedNews.id == int(article_id)).first()
+                        article = articles_map.get(int(article_id))
                         if article and article.translation_cache:
                             cache = article.translation_cache
                             if isinstance(cache, str):
@@ -560,13 +555,23 @@ class NewsTranslator:
                             
                             if target_lang in cache:
                                 cached_val = cache[target_lang]
+                                cached_title = cached_val.get("title") or story.get("title") or story.get("headline")
+                                cached_bullets = cached_val.get("bullets") or story.get("bullets") or story.get("summary_bullets") or []
+                                cached_why = cached_val.get("why") or story.get("why") or story.get("why_it_matters") or story.get("summary") or ""
+                                cached_affected = cached_val.get("affected") or story.get("affected") or story.get("who_is_affected") or ""
+                                
                                 story.update({
-                                    "title": cached_val.get("title", story.get("title")),
-                                    "headline": cached_val.get("title", story.get("headline")),
-                                    "bullets": cached_val.get("bullets", story.get("bullets")),
-                                    "why": cached_val.get("why", story.get("why")),
-                                    "affected": cached_val.get("affected", story.get("affected")),
-                                    "is_cached": True
+                                    "title": cached_title,
+                                    "headline": cached_title,
+                                    "bullets": cached_bullets,
+                                    "summary_bullets": cached_bullets,
+                                    "why": cached_why,
+                                    "why_it_matters": cached_why,
+                                    "summary": cached_why,
+                                    "affected": cached_affected,
+                                    "who_is_affected": cached_affected,
+                                    "is_cached": True,
+                                    "is_translated": True
                                 })
                                 continue
                         
@@ -576,13 +581,23 @@ class NewsTranslator:
                         cache_key = f"{url}_{target_lang}" if url else None
                         if cache_key and cache_key in self._external_cache:
                             cached_val = self._external_cache[cache_key]
+                            cached_title = cached_val.get("t") or story.get("title") or story.get("headline")
+                            cached_bullets = cached_val.get("b") or story.get("bullets") or story.get("summary_bullets") or []
+                            cached_why = cached_val.get("w") or story.get("why") or story.get("why_it_matters") or story.get("summary") or ""
+                            cached_affected = cached_val.get("a") or story.get("affected") or story.get("who_is_affected") or ""
+                            
                             story.update({
-                                "title": cached_val.get("t"),
-                                "headline": cached_val.get("t"),
-                                "bullets": cached_val.get("b"),
-                                "why": cached_val.get("w"),
-                                "affected": cached_val.get("a"),
-                                "is_cached": True
+                                "title": cached_title,
+                                "headline": cached_title,
+                                "bullets": cached_bullets,
+                                "summary_bullets": cached_bullets,
+                                "why": cached_why,
+                                "why_it_matters": cached_why,
+                                "summary": cached_why,
+                                "affected": cached_affected,
+                                "who_is_affected": cached_affected,
+                                "is_cached": True,
+                                "is_translated": True
                             })
                             continue
                     u_indices.append(idx)
@@ -609,8 +624,13 @@ class NewsTranslator:
                 
                 articles_text = ""
                 for idx, story in enumerate(batch_items, 1):
-                    bullets = story.get("bullets", [])
-                    articles_text += f"ID: {story.get('id', idx)}\nT: {story.get('title')}\nB: {' | '.join(bullets)}\nW: {story.get('why', 'N/A')}\nA: {story.get('affected', 'N/A')}\n---\n"
+                    bullets = story.get("bullets") or story.get("summary_bullets") or []
+                    if isinstance(bullets, str):
+                        bullets = [bullets]
+                    why = story.get("why") or story.get("why_it_matters") or story.get("summary") or "N/A"
+                    affected = story.get("affected") or story.get("who_is_affected") or "N/A"
+                    title = story.get("title") or story.get("headline") or ""
+                    articles_text += f"ID: {story.get('id', idx)}\nT: {title}\nB: {' | '.join(bullets)}\nW: {why}\nA: {affected}\n---\n"
 
                 max_attempts = 3 # Fast failover for batches
                 for attempt in range(max_attempts):
@@ -650,17 +670,23 @@ class NewsTranslator:
                 # BATCH FAILBACK: Parallel single-item translation fallback
                 async def translate_item_safe(item):
                     try:
-                        # Parallelize field translations for the single item
-                        t_task = self.translate_text(item.get("title"), target_lang)
-                        b_tasks = [self.translate_text(b, target_lang) for b in item.get("bullets", [])]
-                        w_task = self.translate_text(item.get("why"), target_lang)
-                        a_task = self.translate_text(item.get("affected"), target_lang)
+                        title = item.get("title") or item.get("headline")
+                        bullets = item.get("bullets") or item.get("summary_bullets") or []
+                        if isinstance(bullets, str):
+                            bullets = [bullets]
+                        why = item.get("why") or item.get("why_it_matters") or item.get("summary")
+                        affected = item.get("affected") or item.get("who_is_affected")
+                        
+                        t_task = self.translate_text(title, target_lang)
+                        b_tasks = [self.translate_text(b, target_lang) for b in bullets]
+                        w_task = self.translate_text(why, target_lang)
+                        a_task = self.translate_text(affected, target_lang)
                         
                         t, b, w, a = await asyncio.gather(t_task, asyncio.gather(*b_tasks), w_task, a_task)
                         return {"id": item.get("id"), "t": t, "b": b, "w": w, "a": a}
                     except Exception as e:
                         logger.error(f"Single item fallback failed: {e}")
-                        return {"id": item.get("id"), "t": item.get("title"), "b": item.get("bullets", []), "w": item.get("why"), "a": item.get("affected")}
+                        return {"id": item.get("id"), "t": item.get("title") or item.get("headline"), "b": item.get("bullets") or item.get("summary_bullets") or [], "w": item.get("why") or item.get("why_it_matters") or item.get("summary"), "a": item.get("affected") or item.get("who_is_affected")}
 
                 return await asyncio.gather(*[translate_item_safe(item) for item in batch_items])
 
@@ -676,17 +702,24 @@ class NewsTranslator:
                         tr = trans_map.get(str(orig.get("id")))
                         if not tr: continue
                         
+                        cached_title = tr.get("t")
+                        cached_bullets = tr.get("b")
+                        cached_why = tr.get("w")
+                        cached_affected = tr.get("a")
+
                         orig.update({
-                            "title": tr.get("t"), "headline": tr.get("t"), "bullets": tr.get("b"),
-                            "why": tr.get("w"), "affected": tr.get("a"), "is_translated": True
+                            "title": cached_title, "headline": cached_title, "bullets": cached_bullets, "summary_bullets": cached_bullets,
+                            "why": cached_why, "why_it_matters": cached_why, "summary": cached_why,
+                            "affected": cached_affected, "who_is_affected": cached_affected,
+                            "is_translated": True
                         })
 
                         article = db.query(VerifiedNews).filter(VerifiedNews.id == int(orig["id"])).first()
                         if article:
                             cache = article.translation_cache or {}
                             cache[target_lang] = {
-                                "title": orig["title"], "bullets": orig["bullets"],
-                                "why": orig["why"], "affected": orig["affected"]
+                                "title": cached_title, "bullets": cached_bullets,
+                                "why": cached_why, "affected": cached_affected
                             }
                             article.translation_cache = cache
                             db.commit()

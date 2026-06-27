@@ -23,15 +23,30 @@ async def test_translation():
             # 1. Test LLM Translation (Layer 1/2)
             print("Attempting LLM translation for " + lang + "...")
             result = await translator.translate_text(test_text, lang)
-            print("LLM Result Length: " + str(len(result)))
+            print("LLM Result Length: " + str(len(result)) + ". Result: " + result)
             
-            # 2. Test NLLB Fallback (Layer 3)
+            # 2. Test NVIDIA Translate (Layer 3)
+            print("Verifying NVIDIA Translate Layer for " + lang + "...")
+            nvidia_result = await translator.translate_nvidia(test_text, lang)
+            print("NVIDIA Result Length: " + str(len(nvidia_result)) + ". Result: " + nvidia_result)
+
+            # 3. Test NLLB Fallback (Layer 4)
             print("Verifying NLLB Fallback for " + lang + "...")
             nllb_result = await translator.translate_nllb(test_text, lang)
             print("NLLB Result Length: " + str(len(nllb_result)))
             
+            # 4. Test Skip detection
+            print("Testing Skip Detection (sending back translated text to target)...")
+            skip_result = await translator.translate_text(result, lang)
+            if skip_result == result:
+                print("SUCCESS: Skip Detection verified (translation skipped correctly)")
+            else:
+                print("FAILURE: Skip Detection did not bypass translation")
+                
             if result != test_text:
                 print("SUCCESS: LLM Translation verified for " + lang)
+            if nvidia_result != test_text:
+                print("SUCCESS: NVIDIA Translate verified for " + lang)
             if nllb_result != test_text:
                 print("SUCCESS: NLLB Fallback verified for " + lang)
             
