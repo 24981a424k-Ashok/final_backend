@@ -83,6 +83,19 @@ SOURCE_SUBCATEGORY = {
 }
 
 
+import re
+import html
+
+def strip_html_tags(text: str) -> str:
+    if not text:
+        return ""
+    # Remove HTML tags using a regex
+    clean_regex = re.compile('<.*?>')
+    cleaned_text = re.sub(clean_regex, '', text)
+    # Decode HTML/XML entities (e.g. &amp;, &lt;, &gt;)
+    return html.unescape(cleaned_text).strip()
+
+
 class AiTechCollector:
     """
     Collects AI news & research, filters for AI relevance, summarizes with LLM,
@@ -167,12 +180,14 @@ class AiTechCollector:
                         continue
                     image_url = self._extract_rss_image(entry)
                     content = entry.get("summary", "") or entry.get("description", "") or ""
+                    clean_content = strip_html_tags(content)
+                    clean_title = strip_html_tags(entry.get("title", ""))
                     articles.append({
                         "source_id": source_id,
                         "source_name": feed.feed.get("title", source_id),
-                        "title": entry.get("title", "").strip(),
+                        "title": clean_title,
                         "url": entry.get("link", ""),
-                        "content": content,
+                        "content": clean_content,
                         "image_url": image_url,
                         "published_at": published_at or datetime.utcnow(),
                         "sub_category": SOURCE_SUBCATEGORY.get(source_id, "News"),
@@ -208,9 +223,9 @@ class AiTechCollector:
                     ).json()
                     if not story or story.get("type") != "story":
                         continue
-                    title = story.get("title", "")
+                    title = strip_html_tags(story.get("title", ""))
                     url = story.get("url", f"https://news.ycombinator.com/item?id={sid}")
-                    text = story.get("text", "") or ""
+                    text = strip_html_tags(story.get("text", "") or "")
                     published_at = datetime.utcfromtimestamp(story.get("time", time.time()))
                     articles.append({
                         "source_id": "hackernews",
@@ -246,8 +261,8 @@ class AiTechCollector:
             ns = {"atom": "http://www.w3.org/2005/Atom"}
             articles = []
             for entry in root.findall("atom:entry", ns):
-                title = (entry.findtext("atom:title", "", ns) or "").strip().replace("\n", " ")
-                abstract = (entry.findtext("atom:summary", "", ns) or "").strip()
+                title = strip_html_tags(entry.findtext("atom:title", "", ns) or "").strip().replace("\n", " ")
+                abstract = strip_html_tags(entry.findtext("atom:summary", "", ns) or "").strip()
                 link_el = entry.find("atom:link[@rel='alternate']", ns)
                 link = link_el.attrib.get("href", "") if link_el is not None else ""
                 published_str = entry.findtext("atom:published", "", ns)

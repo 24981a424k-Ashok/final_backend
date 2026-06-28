@@ -627,7 +627,7 @@ async def cleanup_expired_manual_articles(db: Session):
             RawNews, VerifiedNews.raw_news_id == RawNews.id
         ).filter(
             RawNews.source_id == "manual",
-            VerifiedNews.created_at < cutoff
+            VerifiedNews.published_at < cutoff
         ).all()
         
         expired_ids = []
@@ -1049,14 +1049,22 @@ async def _fetch_bootstrap_data(category: Optional[str], country: Optional[str],
         
     if effective_lang and effective_lang.lower() != 'english' and digest_data:
         try:
-            await asyncio.wait_for(
-                translator.translate_node_bulk(digest_data, effective_lang),
-                timeout=60.0
-            )
+            if digest_data.get("top_stories"):
+                logger.info(f"Triggering cache-supported translation for top stories ({effective_lang})...")
+                digest_data["top_stories"] = await translator.translate_stories(
+                    digest_data["top_stories"],
+                    effective_lang
+                )
             if digest_data.get("breaking_news"):
-                logger.info(f"Triggering on-demand translation for breaking news ({effective_lang})...")
+                logger.info(f"Triggering cache-supported translation for breaking news ({effective_lang})...")
                 digest_data["breaking_news"] = await translator.translate_stories(
                     digest_data["breaking_news"][:10],
+                    effective_lang
+                )
+            if digest_data.get("trending_news"):
+                logger.info(f"Triggering cache-supported translation for trending news ({effective_lang})...")
+                digest_data["trending_news"] = await translator.translate_stories(
+                    digest_data["trending_news"],
                     effective_lang
                 )
         except Exception as e:
@@ -2103,6 +2111,7 @@ async def create_manual_student_article(payload: ManualStudentArticleRequest, db
             verified.category = payload.category
             verified.impact_score = 100
             verified.published_at = datetime.utcnow() # Final sync to ensure it stays in FIRST PLACE
+            verified.created_at = datetime.utcnow() # Reset created_at so it doesn't expire immediately!
             verified.why_it_matters = payload.description[:200]
             
             # Update access link in analysis blob
@@ -2157,6 +2166,10 @@ async def update_article(article_id: int, payload: ManualStudentArticleRequest, 
         article.content = payload.description
         article.category = payload.category
         article.impact_score = 100 
+        article.published_at = datetime.utcnow()
+        article.created_at = datetime.utcnow() # Reset created_at so it doesn't expire immediately!
+        if article.raw_news:
+            article.raw_news.published_at = datetime.utcnow()
         
         # Access link storage in analysis blob
         current_analysis = article.analysis or {}
@@ -2443,6 +2456,9 @@ async def _fetch_newsdata_student_articles(db: Session, country_code: str):
     """Async fetch from NewsData.io with robust error handling and categorization."""
     import httpx
     api_key = settings.NEWSDATA_STUDENT_API_KEY
+    if not api_key or str(api_key).strip() == "" or "YOUR_KEY" in str(api_key):
+        logger.warning("NEWSDATA_STUDENT_API_KEY is not configured or empty. Using DB internal fallback mode.")
+        return []
     
     # Categories to fetch
     fetch_cats = {
@@ -2545,6 +2561,8 @@ async def _fetch_newsdata_student_articles(db: Session, country_code: str):
                 d['category'] = "Admissions & Courses"
             elif any(k in combined_text for k in ["job", "recruitment", "fresher", "placement", "hiring", "career", "salary"]):
                 d['category'] = "Career & Jobs"
+            elif any(k in combined_text for k in ["policy", "nep", "national education policy", "guidelines", "regulation", "syllabus change", "academic calendar"]):
+                d['category'] = "Education & Policy"
             else:
                 d['category'] = "All Updates"
                 
@@ -2652,8 +2670,9 @@ async def _update_student_cache_if_needed(db: Session, force: bool = False, coun
         seen_urls.add(dup_key)
         
         if is_manual:
-            # 24-hour auto-expiration check
-            age = datetime.utcnow() - (art.created_at or datetime.utcnow())
+            # 24-hour auto-expiration check (falls back to created_at if published_at is null)
+            pub_time = art.published_at or art.created_at or datetime.utcnow()
+            age = datetime.utcnow() - pub_time
             if age.total_seconds() >= 86400: # 24 hours
                 continue # Expired, auto-delete from app
             cat = art.category
@@ -2668,6 +2687,8 @@ async def _update_student_cache_if_needed(db: Session, force: bool = False, coun
                 cat = "Admissions & Courses"
             elif any(k in combined_text for k in ["job", "recruitment", "fresher", "placement", "hiring", "career", "salary"]):
                 cat = "Career & Jobs"
+            elif any(k in combined_text for k in ["policy", "nep", "national education policy", "guidelines", "regulation", "syllabus change", "academic calendar"]):
+                cat = "Education & Policy"
             else:
                 cat = "All Updates"
         
