@@ -20,39 +20,33 @@ jobs:
           script: |
             set -e
 
-            echo "========== USER =========="
-            whoami
-            id
+            echo "===== Deploying UNIARC Backend ====="
 
-            echo "========== SUDO =========="
-            sudo -n -l || true
-
-            echo "========== SYSTEMCTL =========="
-            which systemctl
-            ls -l /usr/bin/systemctl
-
-            echo "========== PROJECT =========="
             cd /home/reddy/projects/final_backend
 
+            echo "Updating repository..."
             git fetch origin
             git reset --hard origin/main
 
+            echo "Activating virtual environment..."
             source venv/bin/activate
 
+            echo "Upgrading pip..."
             python -m pip install --upgrade pip
 
+            echo "Installing dependencies..."
             pip install -r requirements.txt \
               --extra-index-url https://download.pytorch.org/whl/cpu
 
-            echo "========== RESTART =========="
-            sudo -n /usr/bin/systemctl restart uniarc
+            echo "Restarting backend..."
+            sudo /usr/bin/systemctl restart uniarc
 
             sleep 5
 
-            echo "========== STATUS =========="
-            sudo -n /usr/bin/systemctl status uniarc --no-pager
+            echo "Checking backend status..."
+            sudo /usr/bin/systemctl status uniarc
 
-            echo "========== HEALTH =========="
+            echo "Running health check..."
             curl -f https://api.uniarc.online/api/v2/system/health
 
-            echo "========== DEPLOY SUCCESS =========="
+            echo "Deployment completed successfully."
