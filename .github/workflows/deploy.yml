@@ -20,6 +20,9 @@ jobs:
           script: |
             set -e
 
+            whoami
+            sudo -l
+
             cd /home/reddy/projects/final_backend
 
             git fetch origin
@@ -39,4 +42,3 @@ jobs:
             sudo systemctl status uniarc --no-pager
 
             curl -f https://api.uniarc.online/api/v2/system/health
-# Deployment workflow for UNIARC Backend
