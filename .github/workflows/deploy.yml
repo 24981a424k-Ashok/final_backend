@@ -20,9 +20,18 @@ jobs:
           script: |
             set -e
 
+            echo "========== USER =========="
             whoami
-            sudo -l
+            id
 
+            echo "========== SUDO =========="
+            sudo -n -l || true
+
+            echo "========== SYSTEMCTL =========="
+            which systemctl
+            ls -l /usr/bin/systemctl
+
+            echo "========== PROJECT =========="
             cd /home/reddy/projects/final_backend
 
             git fetch origin
@@ -35,10 +44,15 @@ jobs:
             pip install -r requirements.txt \
               --extra-index-url https://download.pytorch.org/whl/cpu
 
-            sudo systemctl restart uniarc
+            echo "========== RESTART =========="
+            sudo -n /usr/bin/systemctl restart uniarc
 
             sleep 5
 
-            sudo systemctl status uniarc --no-pager
+            echo "========== STATUS =========="
+            sudo -n /usr/bin/systemctl status uniarc --no-pager
 
+            echo "========== HEALTH =========="
             curl -f https://api.uniarc.online/api/v2/system/health
+
+            echo "========== DEPLOY SUCCESS =========="
